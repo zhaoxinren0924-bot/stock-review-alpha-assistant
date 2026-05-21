@@ -3,7 +3,7 @@ services:
     name: stock-review-api
     runtime: python
     plan: free
-    repo: https://github.com/zhaoxinren0924-bot/stock-review-alpha-assistant.git
+    branch: master
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
@@ -16,19 +16,12 @@ services:
         value: staging
       - key: DATABASE_URL
         value: sqlite:///data/portfolio.db
-    disk:
-      name: data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1
 
   - type: web
     name: stock-review-web
     runtime: static
     plan: free
-    repo: https://github.com/zhaoxinren0924-bot/stock-review-alpha-assistant.git
+    branch: master
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
-    envVars:
-      - key: VITE_API_BASE_URL
-        value: https://stock-review-api.onrender.com
