@@ -21,8 +21,9 @@ services:
       mountPath: /opt/render/project/src/data
       sizeGB: 1
 
-  - type: static
+  - type: web
     name: stock-review-web
+    runtime: static
     plan: free
     repo: https://github.com/zhaoxinren0924-bot/stock-review-alpha-assistant.git
     rootDir: frontend
