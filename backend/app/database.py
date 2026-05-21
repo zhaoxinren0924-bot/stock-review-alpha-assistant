@@ -8,7 +8,11 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 # Resolve absolute path so the DB is always at project-root/data/ regardless
 # of where the server is started from.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_DB_PATH = os.path.join(_PROJECT_ROOT, "data", "portfolio.db")
+_DB_DIR = os.path.join(_PROJECT_ROOT, "data")
+_DB_PATH = os.path.join(_DB_DIR, "portfolio.db")
+
+# Ensure data directory exists (needed for Render deployment)
+os.makedirs(_DB_DIR, exist_ok=True)
 
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{_DB_PATH}"
 
