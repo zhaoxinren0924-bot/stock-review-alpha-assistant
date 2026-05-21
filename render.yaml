@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: stock-review-api
+    runtime: python
+    plan: free
+    repo: https://github.com/zhaoxinren0924-bot/stock-review-alpha-assistant.git
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12
+      - key: ENVIRONMENT
+        value: staging
+      - key: ROLLBAR_ENVIRONMENT
+        value: staging
+      - key: DATABASE_URL
+        value: sqlite:///data/portfolio.db
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+
+  - type: static
+    name: stock-review-web
+    plan: free
+    repo: https://github.com/zhaoxinren0924-bot/stock-review-alpha-assistant.git
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://stock-review-api.onrender.com

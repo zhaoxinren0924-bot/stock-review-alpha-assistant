@@ -1,9 +1,16 @@
 """Database configuration and session management."""
 
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///data/portfolio.db"
+# Resolve absolute path so the DB is always at project-root/data/ regardless
+# of where the server is started from.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_DB_PATH = os.path.join(_PROJECT_ROOT, "data", "portfolio.db")
+
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{_DB_PATH}"
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
