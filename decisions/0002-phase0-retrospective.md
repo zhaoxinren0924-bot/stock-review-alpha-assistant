@@ -40,7 +40,43 @@
 
 ---
 
-## 2. 实施过程记录
+## 2. 外部服务与工具的作用
+
+本项目在 Phase 0 中使用了以下外部服务，每个的作用和替代方案：
+
+| 服务 | URL | 在本项目中的作用 | 免费额度 | 替代方案 |
+|---|---|---|---|---|
+| **GitHub** | github.com | 代码托管 + Git 版本控制 + GitHub Actions CI/CD + 分支保护 + PR 流程 | 公共仓库免费 | GitLab, Gitee |
+| **Render** | render.com | 云部署平台：托管后端 Python 服务 + 前端静态站点 | Web Service / Static Site 均免费（有限制） | Vercel（前端）+ Railway（后端）, Fly.io |
+| **Rollbar** | rollbar.com | 错误监控：自动收集后端未捕获异常，按错误类型分组，邮件告警 | 5000 events/月 | Sentry（首选但注册失败）, Bugsnag, GlitchTip |
+| **UptimeRobot** | uptimerobot.com | 可用性监控：每 5 分钟 ping /health 端点，服务宕机时发邮件告警 | 50 个监控项免费 | Pingdom（付费）, Better Uptime, StatusCake |
+| **GitHub Actions** | github.com/features/actions | CI/CD 自动化：代码提交后自动运行 linter / 类型检查 / 单元测试 / 安全扫描 | 2000 分钟/月 | Travis CI, CircleCI |
+| **TruffleHog** | github.com/trufflesecurity/trufflehog | 密钥泄露扫描：检测代码中是否意外提交了 API Key / Token / 密码 | 开源免费 | GitLeaks, detect-secrets |
+
+### 服务之间的关系图
+
+```
+开发者本地
+    │  git push
+    ▼
+GitHub 仓库 ←────── 分支保护 ──────→ PR 必须通过 CI
+    │                                      │
+    │  Blueprint 同步                        │  ruff / mypy / pytest
+    ▼                                      ▼
+Render 部署                         GitHub Actions CI
+    │                                      │
+    │  运行时异常                            │  pip-audit / npm audit
+    ▼                                      ▼
+Rollbar 错误监控 ←────────────────── TruffleHog 密钥扫描
+    │
+    │  宕机检测
+    ▼
+UptimeRobot 可用性监控 ────────────→ 邮件告警
+```
+
+---
+
+## 3. 实施过程记录
 
 ### 2.1 时间线
 
@@ -66,7 +102,7 @@
 
 ---
 
-## 3. 问题与解决方案
+## 4. 问题与解决方案
 
 ### 3.1 问题清单
 
@@ -115,7 +151,7 @@
 
 ---
 
-## 4. 经验教训（可标准化）
+## 5. 经验教训（可标准化）
 
 ### 4.1 项目启动 checklist（以后复用）
 
@@ -213,7 +249,7 @@ async def create_tables():
 
 ---
 
-## 5. 产出物清单
+## 6. 产出物清单
 
 ```
 stock-review-alpha-assistant/
@@ -246,7 +282,7 @@ stock-review-alpha-assistant/
 
 ---
 
-## 6. 下一步建议
+## 7. 下一步建议
 
 ### 6.1 近期（1-2 周）
 
@@ -268,7 +304,7 @@ stock-review-alpha-assistant/
 
 ---
 
-## 7. 成功指标检查
+## 8. 成功指标检查
 
 Phase 0 验收标准（原始蓝图）vs 实际结果：
 
