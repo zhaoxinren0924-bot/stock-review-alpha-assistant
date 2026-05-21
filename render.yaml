@@ -16,12 +16,3 @@ services:
         value: staging
       - key: DATABASE_URL
         value: sqlite:///data/portfolio.db
-
-  - type: web
-    name: stock-review-web
-    runtime: static
-    plan: free
-    branch: master
-    rootDir: frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
