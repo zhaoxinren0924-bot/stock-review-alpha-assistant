@@ -319,3 +319,264 @@ Phase 0 验收标准（原始蓝图）vs 实际结果：
 | decisions/0001-tech-stack.md | 存在 | ✅ 已存在 | 通过 |
 
 **Phase 0 总体评分：7/7 通过。**
+
+---
+
+## 9. 服务之间的数据流向
+
+### 9.1 完整链路（从代码提交到用户访问）
+
+```
+┌─────────────┐     git push      ┌─────────────┐
+│  开发者本地  │ ───────────────→ │   GitHub    │
+│  (VSCode)   │                  │   仓库      │
+└─────────────┘                  └──────┬──────┘
+                                        │
+                    ┌───────────────────┼───────────────────┐
+                    │                   │                   │
+                    ▼                   ▼                   ▼
+           ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+           │ GitHub      │    │ GitHub      │    │ GitHub      │
+           │ Actions     │    │ Actions     │    │ Actions     │
+           │ (Backend)   │    │ (Frontend)  │    │ (Secrets)   │
+           │ ruff/mypy   │    │ tsc/build   │    │ TruffleHog  │
+           │ pytest      │    │ npm audit   │    │ scan        │
+           └──────┬──────┘    └──────┬──────┘    └──────┬──────┘
+                  │                   │                   │
+                  └───────────────────┼───────────────────┘
+                                      │ all pass
+                                      ▼
+                              ┌─────────────┐
+                              │  分支保护    │
+                              │  (PR 合并)   │
+                              └──────┬──────┘
+                                     │
+                                     │ Blueprint sync
+                                     ▼
+                              ┌─────────────┐
+                              │   Render    │
+                              │   部署      │
+                              │  (Staging)  │
+                              └──────┬──────┘
+                                     │
+                    ┌────────────────┼────────────────┐
+                    │                │                │
+                    ▼                ▼                ▼
+           ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+           │   用户访问   │  │   Rollbar   │  │ UptimeRobot │
+           │  (浏览器)    │  │  (错误上报)  │  │ (健康检查)  │
+           │             │  │             │  │             │
+           │ GET /stocks │  │ 500 异常    │  │ GET /health │
+           │             │  │             │  │             │
+           └─────────────┘  └──────┬──────┘  └──────┬──────┘
+                                   │                │
+                                   ▼                ▼
+                          ┌─────────────┐  ┌─────────────┐
+                          │ Rollbar     │  │ UptimeRobot │
+                          │ Dashboard   │  │ Dashboard   │
+                          │ (错误分组)   │  │ (可用率统计) │
+                          └──────┬──────┘  └──────┬──────┘
+                                 │                │
+                                 ▼                ▼
+                          ┌─────────────┐  ┌─────────────┐
+                          │  邮件告警    │  │  邮件告警    │
+                          │ (新错误)     │  │ (宕机)       │
+                          └─────────────┘  └─────────────┘
+```
+
+### 9.2 数据流说明
+
+| 阶段 | 数据内容 | 流向 | 触发条件 |
+|---|---|---|---|
+| **代码提交** | 源代码变更 | 本地 → GitHub | `git push` |
+| **CI 检查** | 测试结果、lint 报告、安全扫描 | GitHub → GitHub Actions | 每次 push / PR |
+| **自动部署** | 最新代码、环境变量 | GitHub → Render | master 分支合并后 |
+| **API 请求** | JSON 数据（股票信息） | 用户浏览器 → Render | 用户操作 |
+| **错误上报** | 异常堆栈、环境信息 | Render → Rollbar | 发生未捕获异常 |
+| **健康检查** | HTTP 状态码 | Render ← UptimeRobot | 每 5 分钟 |
+| **告警通知** | 错误摘要 / 宕机信息 | Rollbar/UptimeRobot → 邮箱 | 错误发生 / 宕机时 |
+
+---
+
+## 10. 操作手册（Step-by-Step）
+
+### 10.1 GitHub 仓库创建
+
+**前提**: 已有 GitHub 账号
+
+1. 访问 https://github.com/new
+2. Repository name: `stock-review-alpha-assistant`
+3. Description: `A股基本面复盘智能助手`
+4. Visibility: **Public**
+5. 勾选 **Add a README file**
+6. 点击 **Create repository**
+
+### 10.2 GitHub Actions CI 配置
+
+**文件**: `.github/workflows/ci.yml`
+
+已创建，包含 3 个 job:
+- `backend-quality`: ruff + mypy + pytest + pip-audit
+- `frontend-quality`: tsc + build + npm audit
+- `secret-scan`: TruffleHog
+
+**验证**: 提交代码后打开仓库 Actions 标签，看到工作流运行。
+
+### 10.3 分支保护配置
+
+**方式 A（API，推荐）**:
+```bash
+# 需要 GitHub Token（repo 权限）
+curl -X PUT \
+  -H "Authorization: token YOUR_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/OWNER/REPO/branches/BRANCH/protection \
+  -d '{
+    "required_status_checks": {
+      "strict": true,
+      "contexts": ["Backend Quality","Frontend Quality","Secret Leakage Scan"]
+    },
+    "required_pull_request_reviews": {"required_approving_review_count": 0},
+    "restrictions": null
+  }'
+```
+
+**方式 B（网页手动）**:
+1. Settings → Branches → Add rule
+2. Branch name pattern: `master`
+3. 勾选 "Require a pull request before merging"
+4. 勾选 "Require status checks to pass before merging"
+5. 搜索并勾选: `Backend Quality`, `Frontend Quality`, `Secret Leakage Scan`
+6. 点击 Create
+
+### 10.4 Render Blueprint 部署
+
+**前提**: 已有 Render 账号，GitHub 已授权连接
+
+1. 访问 https://dashboard.render.com/blueprints
+2. 点击 **New Blueprint Instance**
+3. 选择 GitHub 仓库 `stock-review-alpha-assistant`
+4. 确认读取到 `render.yaml`
+5. 点击 **Apply**
+6. 等待 2-3 分钟部署完成
+7. 点击服务名查看 URL
+
+**环境变量配置**（敏感信息）:
+1. 点击服务 `stock-review-api`
+2. 左侧 Environment 标签
+3. Add Environment Variable
+4. 添加 `ROLLBAR_ACCESS_TOKEN`
+5. Save Changes（自动重新部署）
+
+### 10.5 Rollbar 项目创建与集成
+
+**前提**: 已有 Rollbar 账号
+
+1. 访问 https://rollbar.com/ 登录
+2. 点击 **Create New Project**
+3. Project Name: `stock-review-alpha`
+4. Framework: Python
+5. 进入项目 → Settings → **Project Access Tokens**
+6. 点击 **Create New Token**
+7. Name: `backend-server`
+8. Scopes: 勾选 `post_server_item`
+9. 点击 Create → **立即复制 token**（只显示一次）
+
+**后端代码集成**（已内嵌在 `backend/app/main.py`）:
+```python
+import rollbar
+import os
+
+token = os.environ.get("ROLLBAR_ACCESS_TOKEN")
+if token:
+    rollbar.init(token, environment="staging")
+```
+
+**验证**: 访问一个会报错的 API 端点，然后查看 Rollbar Items 页面。
+
+### 10.6 UptimeRobot 监控创建
+
+**前提**: 已有 UptimeRobot 账号
+
+1. 访问 https://dashboard.uptimerobot.com/
+2. 点击 **+ New** → **Monitor**
+3. Monitor Type: **HTTP(s)**
+4. Friendly Name: `stock-review-api`
+5. URL: `https://stock-review-api.onrender.com/health`
+6. Monitoring Interval: **5 minutes**（免费版最短）
+7. Alert Contacts: 勾选你的邮箱
+8. 点击 **Create Monitor**
+
+**验证**: 等待 5 分钟后，看到监控项状态为 Up（绿色）。
+
+### 10.7 本地开发环境配置
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/zhaoxinren0924-bot/stock-review-alpha-assistant.git
+cd stock-review-alpha-assistant
+
+# 2. 后端依赖
+cd backend
+python -m venv venv
+./venv/Scripts/pip install -r requirements.txt
+cd ..
+
+# 3. 前端依赖
+cd frontend
+npm install
+cd ..
+
+# 4. 环境变量
+cp .env.example .env
+# 编辑 .env，填入 CLAUDE_API_KEY 等
+
+# 5. 启动（单命令）
+python main.py
+# 前端 http://localhost:5173
+# 后端 http://localhost:8000
+```
+
+---
+
+## 11. 成本估算
+
+### 11.1 当前免费版 vs 生产级付费版
+
+| 服务 | 当前（免费） | 限制 | 升级到生产级（预估月费） | 建议升级时机 |
+|---|---|---|---|---|
+| **GitHub** | 公共仓库免费 | 无 | Pro $4/月（私有仓库+高级CI） | 需要私有仓库时 |
+| **Render** | Web Service + Static Site 免费 | 服务休眠（15分钟无请求后）、无持久化磁盘、每月750小时运行时间 | Starter $7/月（不休眠）+ Disk $0.25/GB/月 | 用户超过10人、需要7x24稳定 |
+| **Rollbar** | 5000 events/月 | 无高级功能 | Essentials $49/月（100K events） | 错误量超过5000/月 |
+| **UptimeRobot** | 50 监控项、5分钟间隔 | 无短信/电话告警 | Pro $15/月（1分钟间隔+高级告警） | 需要1分钟级监控 |
+| **GitHub Actions** | 2000 分钟/月 | 超出后 $0.008/分钟 | Team $4/月（3000分钟） | CI 时间超限时 |
+
+### 11.2 项目初期（1-10 用户）
+
+**推荐**: 全部免费版
+- 月费: **$0**
+- Render 服务会有冷启动，但个人使用无感知
+- Rollbar 5000 events 足够 MVP 阶段
+
+### 11.3 项目成长期（10-100 用户）
+
+**推荐升级**:
+- Render Starter: $7/月（解决冷启动）
+- Rollbar Essentials: $49/月（更多错误额度）
+- **月费合计**: ~$56/月
+
+### 11.4 项目成熟期（100+ 用户）
+
+**推荐升级**:
+- Render + Disk: ~$15/月
+- Rollbar Advanced: $99/月
+- UptimeRobot Pro: $15/月
+- GitHub Team: $4/月
+- **月费合计**: ~$133/月
+
+### 11.5 成本优化建议
+
+1. **Render 冷启动**: 用 UptimeRobot 每 5 分钟 ping 一次，保持服务活跃（免费版技巧）
+2. **Rollbar 额度**: 只上报 production/staging 错误，development 环境不上报
+3. **GitHub Actions**: 缓存 pip/npm 依赖，减少构建时间
+4. **数据库**: MVP 阶段 SQLite 足够，用户量大了再考虑 PostgreSQL（Render 支持）
