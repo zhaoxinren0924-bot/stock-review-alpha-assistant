@@ -9,8 +9,8 @@ from fastapi.responses import JSONResponse
 from rollbar.contrib.fastapi import ReporterMiddleware as RollbarMiddleware
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.models import Stock
+from app.database import engine, get_db
+from app.models import Base, Stock
 from app.schemas import StockCreate, StockListResponse, StockResponse
 
 # Initialize Rollbar if token is available
@@ -53,6 +53,12 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
         status_code=500,
         content={"detail": "Internal server error"},
     )
+
+
+@app.on_event("startup")
+async def create_tables():
+    """Create database tables on startup."""
+    Base.metadata.create_all(bind=engine)
 
 
 @app.get("/")
