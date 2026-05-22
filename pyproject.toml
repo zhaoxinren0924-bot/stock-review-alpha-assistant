@@ -47,7 +47,7 @@ show_error_codes = true
 strict_equality = true
 
 [[tool.mypy.overrides]]
-module = ["pandas.*", "stockstats.*"]
+module = ["pandas.*", "rollbar.*", "stockstats.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
