@@ -32,13 +32,13 @@ async def test_health_check() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_stocks_empty() -> None:
-    """Test stocks list returns empty array initially."""
+async def test_list_stocks() -> None:
+    """Test stocks list returns the standard list envelope."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/v1/stocks")
 
     assert response.status_code == 200
     data = response.json()
-    assert data["stocks"] == []
-    assert data["count"] == 0
+    assert isinstance(data["items"], list)
+    assert data["count"] == len(data["items"])
