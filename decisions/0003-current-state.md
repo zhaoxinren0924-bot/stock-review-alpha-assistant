@@ -1,8 +1,13 @@
 ---
-title: 项目当前状态快照
+title: 项目当前状态快照（已过时，见 0004）
 date: 2026-05-21
 phase: 0 完成，1 待开始
+superseded_by: 0004-current-state.md
+status: HISTORICAL
 ---
+
+> ⚠️ **本快照已过时（2026-05-23 起）**。最新状态请看 [`0004-current-state.md`](0004-current-state.md)。
+> 本文件保留作为历史快照，不再更新。
 
 # 项目当前状态（State of the Union）
 

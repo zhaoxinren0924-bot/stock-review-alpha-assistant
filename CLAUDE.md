@@ -78,13 +78,13 @@ stock-review-alpha-assistant/
 
 ## 项目当前阶段
 
-**Phase 0（基础设施）已完成，Phase 1（业务功能）待开始。**
+**Phase 0（基础设施）已完成，Phase 1（业务功能）核心代码已搭好，等端到端验证。**
 
-最新状态见 `decisions/0003-current-state.md`。
+最新状态见 `decisions/0004-current-state.md`（取代 0003）。
 
 ## 每次开新对话时
 
 1. 先读此文件
-2. 读 `decisions/0003-current-state.md` 了解最新进展
-3. 检查 `decisions/` 目录是否有新决策
+2. 读 `decisions/0004-current-state.md` 了解最新进展
+3. 检查 `decisions/` 目录是否有新决策（编号大的优先）
 4. 查看 `data/` 目录确认数据库状态
