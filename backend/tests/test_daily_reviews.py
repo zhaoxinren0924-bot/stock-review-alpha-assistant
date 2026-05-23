@@ -4,8 +4,12 @@ from datetime import date, datetime
 
 import pytest
 from app.database import SessionLocal
-from app.main import app, create_tables
-from app.models import DailyReview, Event, FundamentalMetric, QuoteSnapshot
+from app.main import (
+    app,
+    collect_daily_review_context,
+    create_tables,
+)
+from app.models import DailyReview, Event, FundamentalMetric, QuoteSnapshot, Stock
 from app.services.daily_market_prefill import MarketPrefillResult
 from httpx import ASGITransport, AsyncClient
 
@@ -230,6 +234,148 @@ async def test_prefill_wires_market_sections_into_daily_review(
     assert body["filled"]["capital_rows"] == 1
     assert body["filled"]["limit_rows"] == 1
     assert "恒生指数" in body["missing"]
+
+
+def test_collect_context_for_market_section_excludes_watchlist() -> None:
+    """Market sections 1-4 should not haul in the watchlist or evidence cards.
+
+    Old behavior dumped 30 stocks + 12 evidence cards on every turn; this test
+    locks in the new section-scoped behavior so we don't regress.
+    """
+    db = SessionLocal()
+    try:
+        # Ensure at least one watchlist stock exists so a regression would surface it.
+        existing = db.query(Stock).filter(Stock.code == "999991").first()
+        if existing is None:
+            db.add(Stock(code="999991", name="测试股 A", industry="算力", market="SZ"))
+            db.commit()
+        review = DailyReview(
+            user_id="default",
+            review_date=date(2026, 5, 23),
+            status="draft",
+            content={
+                "index_review": {"indices": [{"name": "上证指数"}], "leading_index": {"value": "上证指数"}},
+                "hotspot_review": {"sentiment_metrics": {"limit_up_count": {"value": 38}}},
+                "watchlist_review": {"targets": []},
+                "fundamental_review": {"company_rows": []},
+            },
+        )
+        db.query(DailyReview).filter(DailyReview.review_date == review.review_date).delete()
+        db.commit()
+        db.add(review)
+        db.commit()
+        db.refresh(review)
+
+        items, evidence = collect_daily_review_context(review, db, section_key="hotspot_review")
+
+        assert len(items) == 2  # meta + current_section only
+        assert items[0]["type"] == "daily_review_meta"
+        assert items[0]["current_section"] == "hotspot_review"
+        assert items[1]["type"] == "current_section"
+        assert items[1]["section_key"] == "hotspot_review"
+        assert all(item["type"] != "watchlist_stock" for item in items)
+        assert evidence == []
+
+        db.delete(review)
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_collect_context_for_company_section_scopes_to_linked_stocks() -> None:
+    """Company sections 5-6 should include only stocks actually referenced in that section."""
+    db = SessionLocal()
+    try:
+        # Three watchlist stocks exist; only one is referenced in the section.
+        for code, name in [("999992", "AA"), ("999993", "BB"), ("999994", "CC")]:
+            if not db.query(Stock).filter(Stock.code == code).first():
+                db.add(Stock(code=code, name=name, industry="算力", market="SZ"))
+        db.commit()
+        review = DailyReview(
+            user_id="default",
+            review_date=date(2026, 5, 24),
+            status="draft",
+            content={
+                "watchlist_review": {
+                    "targets": [
+                        {"stock_code": "999993", "stock_name": "BB"},
+                    ]
+                },
+                "fundamental_review": {"company_rows": []},
+            },
+        )
+        db.query(DailyReview).filter(DailyReview.review_date == review.review_date).delete()
+        db.commit()
+        db.add(review)
+        db.commit()
+        db.refresh(review)
+
+        items, _evidence = collect_daily_review_context(
+            review, db, section_key="watchlist_review"
+        )
+
+        watchlist_codes = [
+            item["code"] for item in items if item["type"] == "watchlist_stock"
+        ]
+        assert watchlist_codes == ["999993"]  # only the referenced one, not all 3+ in DB
+
+        db.delete(review)
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_collect_context_for_tomorrow_plan_condenses_other_sections() -> None:
+    """Section 7 (tomorrow_plan) sees conclusions of sections 1-6, not raw rows."""
+    db = SessionLocal()
+    try:
+        review = DailyReview(
+            user_id="default",
+            review_date=date(2026, 5, 25),
+            status="draft",
+            content={
+                "index_review": {
+                    "indices": [
+                        {"name": f"X{i}", "change_pct": {"value": "1%"}} for i in range(20)
+                    ],
+                    "leading_index": {"value": "创业板指", "source": "data_prefilled"},
+                    "market_style": {"value": "小盘成长", "source": "ai_generated"},
+                },
+                "hotspot_review": {
+                    "main_sectors": [{"sector": {"value": f"板块{i}"}} for i in range(15)],
+                    "sentiment_metrics": {
+                        "limit_up_count": {"value": 38, "source": "data_prefilled"},
+                        "limit_down_count": {"value": 5, "source": "data_prefilled"},
+                    },
+                },
+                "tomorrow_plan": {"market_view": {"value": ""}},
+            },
+        )
+        db.query(DailyReview).filter(DailyReview.review_date == review.review_date).delete()
+        db.commit()
+        db.add(review)
+        db.commit()
+        db.refresh(review)
+
+        items, _ = collect_daily_review_context(
+            review, db, section_key="tomorrow_plan"
+        )
+
+        summary_items = [item for item in items if item["type"] == "review_summary"]
+        assert len(summary_items) == 1
+        summary = summary_items[0]["sections"]
+        # Raw row lists must be stripped.
+        assert "indices" not in summary["index_review"]
+        assert "main_sectors" not in summary["hotspot_review"]
+        # Conclusion fields retained.
+        assert summary["index_review"]["leading_index"] == "创业板指"
+        assert summary["index_review"]["market_style"] == "小盘成长"
+        assert summary["hotspot_review"]["sentiment_metrics"]["limit_up_count"] == 38
+
+        db.delete(review)
+        db.commit()
+    finally:
+        db.close()
 
 
 @pytest.mark.asyncio

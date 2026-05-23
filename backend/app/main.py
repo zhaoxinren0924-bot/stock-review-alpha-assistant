@@ -1,5 +1,6 @@
 ﻿"""Stock Review Alpha Assistant - Main Application."""
 
+import asyncio
 import json
 import logging
 import os
@@ -70,7 +71,11 @@ from app.schemas import (
     StockListResponse,
     StockResponse,
 )
-from app.services.daily_market_prefill import build_daily_market_prefill_service
+from app.services.daily_market_prefill import (
+    _fmt_amount,
+    _to_float,
+    build_daily_market_prefill_service,
+)
 from app.services.data_refresh import build_data_refresh_service
 from app.services.llm.base import LLMProviderError, LLMRequest
 from app.services.llm.factory import get_llm_provider
@@ -707,6 +712,19 @@ def prefill_daily_review_content(
     normalize_daily_review_content(review)
     content = dict(review.content)
     stocks = db.query(Stock).order_by(Stock.created_at.desc()).all()
+
+    # Auto-refresh missing quote snapshots so watchlist/fundamental reviews have amount/close/pe/pb.
+    refresh_service = build_data_refresh_service()
+    for stock in stocks:
+        has_quote = (
+            db.query(QuoteSnapshot)
+            .filter(QuoteSnapshot.stock_code == stock.code)
+            .first()
+            is not None
+        )
+        if not has_quote:
+            refresh_service.refresh_stock(db, stock.code, {"quote"})
+
     evidence_cards: list[EvidenceCard] = []
     filled = {"watchlist_targets": 0, "company_rows": 0, "evidence_cards": 0}
     missing: list[str] = []
@@ -722,6 +740,46 @@ def prefill_daily_review_content(
             )
     filled.update(market_result.filled)
     missing.extend(market_result.missing)
+
+    # Fallback: if market-wide capital data failed, use watchlist quotes sorted by amount.
+    capital_section = content.get("capital_review", {})
+    if not capital_section.get("turnover_leaders"):
+        quote_leaders: list[dict[str, object]] = []
+        for stock in stocks:
+            q = (
+                db.query(QuoteSnapshot)
+                .filter(QuoteSnapshot.stock_code == stock.code)
+                .order_by(QuoteSnapshot.date.desc())
+                .first()
+            )
+            if q and q.amount:
+                quote_leaders.append(
+                    {
+                        "target": field_value(stock.name, SOURCE_DATA),
+                        "amount": field_value(_fmt_amount(q.amount), SOURCE_DATA),
+                        "sector": field_value(stock.industry or ""),
+                        "intent": field_value("", SOURCE_MANUAL, "主力意图猜测需要用户确认，系统不自动下结论。"),
+                    }
+                )
+        quote_leaders.sort(
+            key=lambda r: _to_float(r["amount"]["value"]) or 0,
+            reverse=True,
+        )
+        if quote_leaders:
+            content["capital_review"] = deep_merge_dict(
+                content.get("capital_review", {}),
+                {
+                    "turnover_leaders": quote_leaders[:10],
+                    "capital_direction": field_value(
+                        "；".join(str(item["target"]["value"]) for item in quote_leaders[:3]),
+                        SOURCE_DATA,
+                        "来自自选股最新行情成交额，非全市场排名。",
+                    ),
+                },
+            )
+            filled["capital_rows"] = len(quote_leaders[:10])
+            if "个股成交额排名" in missing:
+                missing.remove("个股成交额排名")
 
     watchlist_targets = []
     company_rows = []
@@ -846,38 +904,164 @@ async def prefill_daily_review(review_id: int, db: DbSession) -> DailyReviewPref
     )
 
 
+MARKET_DAILY_SECTIONS = {
+    "index_review",
+    "hotspot_review",
+    "capital_review",
+    "limit_review",
+}
+COMPANY_DAILY_SECTIONS = {
+    "watchlist_review",
+    "fundamental_review",
+}
+
+
+def _extract_stock_codes_from_section(section_content: object) -> list[str]:
+    """Pick out unique stock_code strings from any list-of-dicts in a section."""
+    codes: list[str] = []
+    if not isinstance(section_content, dict):
+        return codes
+    for value in section_content.values():
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict):
+                code = item.get("stock_code")
+                if isinstance(code, str) and code and code not in codes:
+                    codes.append(code)
+    return codes
+
+
+def _condense_section_for_summary(section: object) -> dict[str, object]:
+    """Keep only conclusion-type fields; drop long raw row lists.
+
+    Each section field is either:
+      - a {value, source, note} dict (a single conclusion field) → keep value
+      - a nested dict of conclusion fields (e.g. sentiment_metrics) → keep values
+      - a list of row dicts (e.g. indices, turnover_leaders) → drop
+    """
+    if not isinstance(section, dict):
+        return {}
+    out: dict[str, object] = {}
+    for key, value in section.items():
+        if isinstance(value, list):
+            continue
+        if isinstance(value, dict):
+            inner_value = value.get("value")
+            if inner_value not in (None, "", []):
+                out[key] = inner_value
+                continue
+            nested: dict[str, object] = {}
+            for nested_key, nested_val in value.items():
+                if isinstance(nested_val, dict):
+                    nv = nested_val.get("value")
+                    if nv not in (None, "", []):
+                        nested[nested_key] = nv
+            if nested:
+                out[key] = nested
+            continue
+        if value not in (None, "", []):
+            out[key] = value
+    return out
+
+
 def collect_daily_review_context(
     review: DailyReview,
     db: Session,
+    section_key: str | None = None,
 ) -> tuple[list[dict[str, object]], list[EvidenceCard]]:
-    """Collect compact daily-review context for the AI coach."""
+    """Collect *section-scoped* daily-review context for the AI coach.
+
+    Strategy: avoid dumping the whole review.content + 30 stocks + 12 evidence
+    cards on every turn. Instead, scope what's included to what's actually
+    relevant to the section the user is currently working in.
+    """
     normalize_daily_review_content(review)
-    stocks = db.query(Stock).order_by(Stock.created_at.desc()).limit(30).all()
-    context_items: list[dict[str, object]] = [
-        {
-            "type": "daily_review",
-            "id": review.id,
-            "review_date": _model_date(review.review_date).isoformat(),
-            "status": review.status,
-            "market_style": review.market_style,
-            "main_sector": review.main_sector,
-            "sentiment": review.sentiment,
-            "content": review.content,
-        }
-    ]
-    context_items.extend(
-        {
-            "type": "watchlist_stock",
-            "code": stock.code,
-            "name": stock.name,
-            "industry": stock.industry,
-        }
-        for stock in stocks
-    )
+    content = review.content or {}
+
+    meta: dict[str, object] = {
+        "type": "daily_review_meta",
+        "id": review.id,
+        "review_date": _model_date(review.review_date).isoformat(),
+        "status": review.status,
+        "market_style": review.market_style,
+        "main_sector": review.main_sector,
+        "sentiment": review.sentiment,
+        "current_section": section_key,
+    }
+    context_items: list[dict[str, object]] = [meta]
     evidence_cards: list[EvidenceCard] = []
-    for stock in stocks[:12]:
-        evidence_cards.extend(collect_evidence_cards(stock.code, db, limit=3))
-    return context_items, evidence_cards[:12]
+
+    if section_key in MARKET_DAILY_SECTIONS:
+        # Indices / hotspots / capital / limit boards: pure market-level work.
+        # No need for any watchlist or per-stock evidence — that's noise here.
+        section_content = content.get(section_key)
+        if isinstance(section_content, dict):
+            context_items.append({
+                "type": "current_section",
+                "section_key": section_key,
+                "content": section_content,
+            })
+        return context_items, evidence_cards
+
+    if section_key in COMPANY_DAILY_SECTIONS:
+        # Watchlist / fundamental: include only stocks actually referenced
+        # in this section, plus their evidence (2 cards/stock, not 3).
+        section_content = content.get(section_key)
+        if isinstance(section_content, dict):
+            context_items.append({
+                "type": "current_section",
+                "section_key": section_key,
+                "content": section_content,
+            })
+        codes = _extract_stock_codes_from_section(section_content)
+        if not codes:
+            recent_stocks = db.query(Stock).order_by(Stock.created_at.desc()).limit(8).all()
+            codes = [stock.code for stock in recent_stocks]
+        for code in codes[:8]:
+            stock = db.query(Stock).filter(Stock.code == code).first()
+            if stock is None:
+                continue
+            context_items.append({
+                "type": "watchlist_stock",
+                "code": stock.code,
+                "name": stock.name,
+                "industry": stock.industry,
+            })
+            evidence_cards.extend(collect_evidence_cards(stock.code, db, limit=2))
+        return context_items, evidence_cards[:8]
+
+    if section_key == "tomorrow_plan":
+        # Tomorrow plan needs the *conclusions* of sections 1-6, not raw rows.
+        summary: dict[str, object] = {}
+        for key in (
+            "index_review",
+            "hotspot_review",
+            "capital_review",
+            "limit_review",
+            "watchlist_review",
+            "fundamental_review",
+        ):
+            section_obj = content.get(key)
+            condensed = _condense_section_for_summary(section_obj)
+            if condensed:
+                summary[key] = condensed
+        section_content = content.get("tomorrow_plan")
+        if isinstance(section_content, dict):
+            context_items.append({
+                "type": "current_section",
+                "section_key": "tomorrow_plan",
+                "content": section_content,
+            })
+        if summary:
+            context_items.append({
+                "type": "review_summary",
+                "sections": summary,
+            })
+        return context_items, evidence_cards
+
+    # weekly_review or unknown: minimal context, just meta.
+    return context_items, evidence_cards
 
 
 def build_daily_review_coach_prompt(
@@ -1037,7 +1221,9 @@ async def coach_daily_review(
 ) -> DailyReviewCoachResponse:
     """Guide a user through one daily review section and return pending actions."""
     review = get_daily_review_or_404(review_id, db)
-    context_items, evidence_cards = collect_daily_review_context(review, db)
+    context_items, evidence_cards = collect_daily_review_context(
+        review, db, section_key=request.section_key
+    )
     has_external_evidence = any(card.source_level in {"A", "B", "C"} for card in evidence_cards)
     prompt = build_daily_review_coach_prompt(
         review=review,
@@ -1046,7 +1232,7 @@ async def coach_daily_review(
         context_items=context_items,
         evidence_cards=evidence_cards,
     )
-    llm_result = call_llm_daily_review_ai(prompt, review_id)
+    llm_result = await asyncio.to_thread(call_llm_daily_review_ai, prompt, review_id)
     if llm_result:
         reply, actions = llm_result
         if not actions:
@@ -1951,7 +2137,7 @@ async def ai_chat(request: AiChatRequest, db: DbSession) -> AiChatResponse:
         evidence_cards=evidence_cards,
         has_external_evidence=has_external_evidence,
     )
-    llm_result = call_llm_ai(prompt, request.stock_code)
+    llm_result = await asyncio.to_thread(call_llm_ai, prompt, request.stock_code)
     if llm_result:
         reply, actions = llm_result
         if not actions:
