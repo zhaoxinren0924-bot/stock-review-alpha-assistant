@@ -163,6 +163,64 @@ class ReviewListResponse(BaseModel):
     count: int
 
 
+class DailyReviewUpdate(BaseModel):
+    """Schema for updating a structured daily review."""
+
+    status: str | None = Field(None, min_length=1, max_length=20)
+    market_style: str | None = Field(None, max_length=50)
+    main_sector: str | None = Field(None, max_length=100)
+    sentiment: str | None = Field(None, max_length=50)
+    content: dict[str, Any] | None = None
+
+
+class DailyReviewResponse(BaseModel):
+    """Structured daily review response."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    review_date: date
+    status: str
+    market_style: str | None = None
+    main_sector: str | None = None
+    sentiment: str | None = None
+    content: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+class DailyReviewListResponse(BaseModel):
+    """Daily review list response."""
+
+    items: list[DailyReviewResponse]
+    count: int
+
+
+class DailyReviewPrefillResponse(BaseModel):
+    """Result of applying available data to the daily review template."""
+
+    review: DailyReviewResponse
+    filled: dict[str, int]
+    missing: list[str]
+    evidence_cards: list["EvidenceCard"]
+
+
+class DailyReviewCoachRequest(BaseModel):
+    """AI coach request for one daily review section."""
+
+    message: str = Field(..., min_length=1)
+    section_key: str | None = Field(None, max_length=50)
+    history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class DailyReviewCoachResponse(BaseModel):
+    """AI coach response for daily review workflow."""
+
+    reply: str
+    actions: list["AiAction"]
+    evidence_cards: list["EvidenceCard"]
+
+
 class DataRefreshRequest(BaseModel):
     """Request for refreshing data sources for a stock."""
 

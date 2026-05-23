@@ -19,6 +19,7 @@ from app.database import engine, get_db
 from app.models import (
     Base,
     CheckItem,
+    DailyReview,
     Event,
     FundamentalMetric,
     Hypothesis,
@@ -39,6 +40,12 @@ from app.schemas import (
     CheckItemListResponse,
     CheckItemResponse,
     CheckItemUpdate,
+    DailyReviewCoachRequest,
+    DailyReviewCoachResponse,
+    DailyReviewListResponse,
+    DailyReviewPrefillResponse,
+    DailyReviewResponse,
+    DailyReviewUpdate,
     DataRefreshRequest,
     DataRefreshResponse,
     EventListResponse,
@@ -63,6 +70,7 @@ from app.schemas import (
     StockListResponse,
     StockResponse,
 )
+from app.services.daily_market_prefill import build_daily_market_prefill_service
 from app.services.data_refresh import build_data_refresh_service
 from app.services.llm.base import LLMProviderError, LLMRequest
 from app.services.llm.factory import get_llm_provider
@@ -172,6 +180,10 @@ def ensure_sqlite_columns() -> None:
             "generated_by": "VARCHAR(20) NOT NULL DEFAULT 'ai'",
             "user_confirmed": "BOOLEAN NOT NULL DEFAULT 0",
             "confirmed_at": "DATETIME",
+        },
+        "daily_reviews": {
+            "user_id": "VARCHAR(50) NOT NULL DEFAULT 'default'",
+            "updated_at": "DATETIME",
         },
     }
 
@@ -495,6 +507,703 @@ async def delete_review(review_id: int, db: DbSession) -> None:
     db.commit()
 
 
+SOURCE_MANUAL = "manual"
+SOURCE_DATA = "data_prefilled"
+SOURCE_AI = "ai_generated"
+SOURCE_INSUFFICIENT = "insufficient_evidence"
+
+
+def field_value(value: object = "", source: str = SOURCE_MANUAL, note: str = "") -> dict[str, object]:
+    """Build a traceable daily review field."""
+    return {"value": value, "source": source, "note": note}
+
+
+def build_daily_review_template(review_date: date) -> dict[str, object]:
+    """Return the v1 structured daily review template."""
+    is_weekend = review_date.weekday() >= 5
+    return {
+        "index_review": {
+            "indices": [
+                {"name": name, "change_pct": field_value(), "turnover": field_value(), "note": field_value()}
+                for name in ["上证指数", "深证成指", "创业板指", "科创50", "中证2000", "恒生指数", "纳斯达克", "标普500"]
+            ],
+            "leading_index": field_value(),
+            "market_style": field_value(),
+            "external_impact": field_value("", SOURCE_INSUFFICIENT, "第一版尚未接入指数全量数据，需用户补充。"),
+        },
+        "hotspot_review": {
+            "sentiment_metrics": {
+                "limit_up_count": field_value("", SOURCE_INSUFFICIENT, "第一版尚未接入全市场涨停家数。"),
+                "limit_down_count": field_value("", SOURCE_INSUFFICIENT, "第一版尚未接入全市场跌停家数。"),
+                "streak_height": field_value("", SOURCE_INSUFFICIENT, "第一版尚未接入连板高度。"),
+                "failed_board_rate": field_value("", SOURCE_INSUFFICIENT, "第一版尚未接入炸板率。"),
+            },
+            "main_sectors": [],
+            "summary": field_value(),
+        },
+        "capital_review": {
+            "turnover_leaders": [],
+            "capital_direction": field_value("", SOURCE_INSUFFICIENT, "第一版尚未接入成交额榜单和资金流全量数据。"),
+        },
+        "limit_review": {
+            "risk_rows": [],
+            "opportunity_rows": [],
+            "common_summary": field_value("", SOURCE_INSUFFICIENT, "第一版尚未接入涨跌停个股全量数据。"),
+        },
+        "watchlist_review": {
+            "pool_status": {
+                "holding_count": field_value(0, SOURCE_DATA, "来自当前关注股票数量。"),
+                "monthly_added": field_value("", SOURCE_MANUAL),
+                "monthly_removed": field_value("", SOURCE_MANUAL),
+            },
+            "targets": [],
+        },
+        "fundamental_review": {
+            "macro_checklist": [],
+            "industry_checklist": [],
+            "company_rows": [],
+            "risk_checklist": [
+                {"label": "ST/退市风险", "checked": False, "source": SOURCE_MANUAL},
+                {"label": "高质押/减持", "checked": False, "source": SOURCE_MANUAL},
+                {"label": "业绩变脸/商誉减值", "checked": False, "source": SOURCE_MANUAL},
+                {"label": "解禁/大额减持", "checked": False, "source": SOURCE_MANUAL},
+            ],
+        },
+        "tomorrow_plan": {
+            "market_view": field_value(),
+            "position_plan": field_value(),
+            "focus_sectors": [],
+            "operation_plan": [],
+            "lessons": field_value(),
+        },
+        "weekly_review": {
+            "enabled": is_weekend,
+            "market_style_summary": field_value(),
+            "hotspot_evolution": field_value(),
+            "capital_flow_summary": field_value(),
+            "watchlist_audit": field_value(),
+            "next_week_plan": field_value(),
+            "pnl_attribution": field_value(),
+        },
+    }
+
+
+def deep_merge_dict(base: dict[str, object], updates: dict[str, object]) -> dict[str, object]:
+    """Merge nested dicts so section updates do not wipe the whole template."""
+    merged = dict(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge_dict(merged[key], value)  # type: ignore[arg-type]
+        else:
+            merged[key] = value
+    return merged
+
+
+def get_daily_review_or_404(review_id: int, db: Session) -> DailyReview:
+    """Return the default user's daily review or raise a 404."""
+    review = (
+        db.query(DailyReview)
+        .filter(DailyReview.id == review_id, DailyReview.user_id == "default")
+        .first()
+    )
+    if not review:
+        raise HTTPException(status_code=404, detail=f"Daily review {review_id} not found")
+    return review
+
+
+def normalize_daily_review_content(review: DailyReview) -> None:
+    """Ensure older drafts have every v1 template section."""
+    template = build_daily_review_template(_model_date(review.review_date))
+    review.content = deep_merge_dict(template, review.content or {})
+
+
+@app.get("/api/v1/daily-reviews", response_model=DailyReviewListResponse)
+async def list_daily_reviews(
+    db: DbSession,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> DailyReviewListResponse:
+    """List structured daily reviews."""
+    query = db.query(DailyReview).filter(DailyReview.user_id == "default")
+    if date_from:
+        query = query.filter(DailyReview.review_date >= date_from)
+    if date_to:
+        query = query.filter(DailyReview.review_date <= date_to)
+    reviews = query.order_by(DailyReview.review_date.desc()).all()
+    for review in reviews:
+        normalize_daily_review_content(review)
+    return DailyReviewListResponse(
+        items=[DailyReviewResponse.model_validate(review) for review in reviews],
+        count=len(reviews),
+    )
+
+
+@app.get("/api/v1/daily-reviews/{review_date}", response_model=DailyReviewResponse)
+async def get_daily_review(review_date: date, db: DbSession) -> DailyReview:
+    """Get one structured daily review by date."""
+    review = (
+        db.query(DailyReview)
+        .filter(DailyReview.user_id == "default", DailyReview.review_date == review_date)
+        .first()
+    )
+    if not review:
+        raise HTTPException(status_code=404, detail=f"Daily review {review_date.isoformat()} not found")
+    normalize_daily_review_content(review)
+    return review
+
+
+@app.post("/api/v1/daily-reviews/{review_date}/initialize", response_model=DailyReviewResponse, status_code=201)
+async def initialize_daily_review(review_date: date, db: DbSession) -> DailyReview:
+    """Create or return a daily review draft with the full v1 template."""
+    existing = (
+        db.query(DailyReview)
+        .filter(DailyReview.user_id == "default", DailyReview.review_date == review_date)
+        .first()
+    )
+    if existing:
+        normalize_daily_review_content(existing)
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    review = DailyReview(
+        user_id="default",
+        review_date=review_date,
+        status="draft",
+        content=build_daily_review_template(review_date),
+    )
+    db.add(review)
+    db.commit()
+    db.refresh(review)
+    return review
+
+
+@app.put("/api/v1/daily-reviews/{review_id}", response_model=DailyReviewResponse)
+async def update_daily_review(
+    review_id: int,
+    request: DailyReviewUpdate,
+    db: DbSession,
+) -> DailyReview:
+    """Update top-level metadata or structured content for a daily review."""
+    review = get_daily_review_or_404(review_id, db)
+    for field, value in request.model_dump(exclude_unset=True).items():
+        if field == "content" and isinstance(value, dict):
+            normalize_daily_review_content(review)
+            review.content = deep_merge_dict(review.content, value)
+        else:
+            setattr(review, field, value)
+    review.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(review)
+    normalize_daily_review_content(review)
+    return review
+
+
+def prefill_daily_review_content(
+    review: DailyReview,
+    db: Session,
+) -> tuple[dict[str, object], dict[str, int], list[str], list[EvidenceCard]]:
+    """Prefill the template using local stock/evidence data and market-wide feeds."""
+    normalize_daily_review_content(review)
+    content = dict(review.content)
+    stocks = db.query(Stock).order_by(Stock.created_at.desc()).all()
+    evidence_cards: list[EvidenceCard] = []
+    filled = {"watchlist_targets": 0, "company_rows": 0, "evidence_cards": 0}
+    missing: list[str] = []
+
+    # Sections 1-4: indices / hotspots / capital flow / limit boards (market-wide).
+    market_service = build_daily_market_prefill_service()
+    market_result = market_service.prefill(review.review_date)
+    for section_key, patch in market_result.content_patch.items():
+        if isinstance(patch, dict):
+            content[section_key] = deep_merge_dict(
+                content.get(section_key, {}),  # type: ignore[arg-type]
+                patch,
+            )
+    filled.update(market_result.filled)
+    missing.extend(market_result.missing)
+
+    watchlist_targets = []
+    company_rows = []
+    for stock in stocks:
+        latest_events = (
+            db.query(Event)
+            .filter(Event.stock_code == stock.code, Event.is_duplicate.is_(False))
+            .order_by(Event.published_at.desc())
+            .limit(3)
+            .all()
+        )
+        latest_metrics = (
+            db.query(FundamentalMetric)
+            .filter(FundamentalMetric.stock_code == stock.code)
+            .order_by(FundamentalMetric.created_at.desc())
+            .limit(3)
+            .all()
+        )
+        latest_quote = (
+            db.query(QuoteSnapshot)
+            .filter(QuoteSnapshot.stock_code == stock.code)
+            .order_by(QuoteSnapshot.date.desc())
+            .first()
+        )
+
+        event_summary = "；".join(event.summary or event.title for event in latest_events) or "暂无公告/新闻证据"
+        metric_summary = "；".join(
+            f"{metric.metric_name} {metric.value if metric.value is not None else '暂无'}{metric.unit or ''}"
+            for metric in latest_metrics
+        ) or "暂无指标证据"
+        quote_summary = (
+            f"收盘 {latest_quote.close if latest_quote and latest_quote.close is not None else '暂无'}，"
+            f"PE {latest_quote.pe if latest_quote and latest_quote.pe is not None else '暂无'}，"
+            f"PB {latest_quote.pb if latest_quote and latest_quote.pb is not None else '暂无'}"
+        )
+
+        watchlist_targets.append(
+            {
+                "stock_code": stock.code,
+                "stock_name": stock.name,
+                "technical_shape": field_value("", SOURCE_MANUAL),
+                "daily_trend": field_value("", SOURCE_MANUAL),
+                "intraday_position": field_value("", SOURCE_MANUAL),
+                "planned_action": field_value("", SOURCE_MANUAL, "只记录用户计划，不代表系统建议。"),
+                "fundamental_change": field_value(event_summary, SOURCE_DATA if latest_events else SOURCE_INSUFFICIENT),
+            }
+        )
+        company_rows.append(
+            {
+                "stock_code": stock.code,
+                "stock_name": stock.name,
+                "earnings_expectation": field_value("", SOURCE_MANUAL),
+                "announcement_news": field_value(event_summary, SOURCE_DATA if latest_events else SOURCE_INSUFFICIENT),
+                "shareholder_changes": field_value("", SOURCE_MANUAL),
+                "financial_risk": field_value(metric_summary, SOURCE_DATA if latest_metrics else SOURCE_INSUFFICIENT),
+                "valuation_position": field_value(quote_summary, SOURCE_DATA if latest_quote else SOURCE_INSUFFICIENT),
+            }
+        )
+        filled["watchlist_targets"] += 1
+        filled["company_rows"] += 1
+
+        for event in latest_events:
+            evidence_cards.append(
+                make_evidence_card(
+                    source_type=event.source_type or event.event_type or "news",
+                    source_provider=event.source_provider or event.source,
+                    source_url=event.source_url,
+                    title=f"{stock.name}：{event.title}",
+                    summary=event.summary or event.content or event.title,
+                    published_at=event.published_at,
+                    fetched_at=event.fetched_at,
+                    confidence=event.confidence,
+                )
+            )
+        for metric in latest_metrics:
+            evidence_cards.append(
+                make_evidence_card(
+                    source_type="fundamental_metric",
+                    source_provider=metric.source_provider or "unknown",
+                    title=f"{stock.name}：{metric.metric_name}",
+                    summary=(
+                        f"{metric.metric_name} 在 {metric.period or '未知期间'} 的值为 "
+                        f"{metric.value if metric.value is not None else '暂无'}{metric.unit or ''}。"
+                    ),
+                    published_at=_date_start(metric.report_date),
+                    fetched_at=metric.created_at,
+                )
+            )
+
+    content["watchlist_review"] = deep_merge_dict(
+        content.get("watchlist_review", {}),
+        {
+            "pool_status": {
+                "holding_count": field_value(len(stocks), SOURCE_DATA, "来自当前关注股票数量。"),
+            },
+            "targets": watchlist_targets,
+        },
+    )
+    content["fundamental_review"] = deep_merge_dict(
+        content.get("fundamental_review", {}),
+        {"company_rows": company_rows},
+    )
+    filled["evidence_cards"] = len(evidence_cards[:12])
+    return content, filled, missing, evidence_cards[:12]
+
+
+@app.post("/api/v1/daily-reviews/{review_id}/prefill", response_model=DailyReviewPrefillResponse)
+async def prefill_daily_review(review_id: int, db: DbSession) -> DailyReviewPrefillResponse:
+    """Prefill a daily review from existing watchlist, evidence and metrics."""
+    review = get_daily_review_or_404(review_id, db)
+    content, filled, missing, evidence_cards = prefill_daily_review_content(review, db)
+    review.content = content
+    review.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(review)
+    normalize_daily_review_content(review)
+    return DailyReviewPrefillResponse(
+        review=DailyReviewResponse.model_validate(review),
+        filled=filled,
+        missing=missing,
+        evidence_cards=evidence_cards,
+    )
+
+
+def collect_daily_review_context(
+    review: DailyReview,
+    db: Session,
+) -> tuple[list[dict[str, object]], list[EvidenceCard]]:
+    """Collect compact daily-review context for the AI coach."""
+    normalize_daily_review_content(review)
+    stocks = db.query(Stock).order_by(Stock.created_at.desc()).limit(30).all()
+    context_items: list[dict[str, object]] = [
+        {
+            "type": "daily_review",
+            "id": review.id,
+            "review_date": _model_date(review.review_date).isoformat(),
+            "status": review.status,
+            "market_style": review.market_style,
+            "main_sector": review.main_sector,
+            "sentiment": review.sentiment,
+            "content": review.content,
+        }
+    ]
+    context_items.extend(
+        {
+            "type": "watchlist_stock",
+            "code": stock.code,
+            "name": stock.name,
+            "industry": stock.industry,
+        }
+        for stock in stocks
+    )
+    evidence_cards: list[EvidenceCard] = []
+    for stock in stocks[:12]:
+        evidence_cards.extend(collect_evidence_cards(stock.code, db, limit=3))
+    return context_items, evidence_cards[:12]
+
+
+def build_daily_review_coach_prompt(
+    *,
+    review: DailyReview,
+    message: str,
+    section_key: str | None,
+    context_items: list[dict[str, object]],
+    evidence_cards: list[EvidenceCard],
+) -> str:
+    """Build a strict prompt for the daily review coach."""
+    context_json = json.dumps(context_items, ensure_ascii=False, default=str)
+    evidence_json = json.dumps(
+        [card.model_dump(mode="json") for card in evidence_cards],
+        ensure_ascii=False,
+        default=str,
+    )
+    return f"""
+你是“A股每日复盘教练”，任务是引导用户把市场、板块、自选股和基本面观察沉淀为结构化每日复盘。
+
+复盘日期：{_model_date(review.review_date).isoformat()}
+当前 section：{section_key or "未指定"}
+用户消息：
+{message}
+
+当前复盘和自选股上下文 JSON：
+{context_json}
+
+可用证据卡 JSON：
+{evidence_json}
+
+必须遵守：
+1. 不得使用“买入”“卖出”“荐股”“建议建仓”“建议清仓”等措辞。
+2. 不得预测短线涨跌，不得编造未提供的数据。
+3. 必须区分：证据卡事实、用户观点、AI 推理、证据不足。
+4. 如果证据不足，reply 必须明确包含“当前证据不足”。
+5. actions 只能是 update_daily_review_section、create_daily_review_action、link_evidence_to_daily_review、create_check_item、create_review。
+6. actions 是待保存成果，用户确认后才会写库。
+
+只输出合法 JSON：
+{{
+  "reply": "中文回复",
+  "actions": [
+    {{
+      "type": "update_daily_review_section",
+      "payload": {{
+        "daily_review_id": {review.id},
+        "section_key": "{section_key or "tomorrow_plan"}",
+        "patch": {{
+          "summary": {{"value": "用户确认后的复盘要点", "source": "ai_generated", "note": "基于用户输入整理"}}
+        }}
+      }}
+    }}
+  ]
+}}
+""".strip()
+
+
+def build_local_daily_review_actions(
+    message: str,
+    review_id: int,
+    section_key: str | None,
+    has_external_evidence: bool,
+) -> list[AiAction]:
+    """Build deterministic daily-review actions when LLM is unavailable."""
+    target_section = section_key or "tomorrow_plan"
+    note = "基于用户输入和现有证据整理，需用户确认。" if has_external_evidence else "当前证据不足，先沉淀为待验证观点。"
+    return [
+        AiAction(
+            type="update_daily_review_section",
+            payload={
+                "daily_review_id": review_id,
+                "section_key": target_section,
+                "patch": {
+                    "ai_notes": [
+                        {
+                            "value": message,
+                            "source": SOURCE_AI,
+                            "note": note,
+                            "created_at": datetime.utcnow().isoformat(),
+                        }
+                    ]
+                },
+            },
+        ),
+        AiAction(
+            type="create_daily_review_action",
+            payload={
+                "daily_review_id": review_id,
+                "section_key": target_section,
+                "content": f"继续验证：{message}",
+                "source": SOURCE_AI,
+            },
+        ),
+    ]
+
+
+def build_local_daily_review_reply(has_external_evidence: bool) -> str:
+    """Return a conservative daily-review coach fallback reply."""
+    if not has_external_evidence:
+        return (
+            "当前证据不足：系统还没有足够的公告、指标、行情或新闻来验证这段复盘。"
+            "我先把你的判断整理成待确认的复盘要点，并建议你补充触发条件和后续观察项。"
+        )
+    return (
+        "我会把已有证据当作线索，而不是结论。下面的待保存成果会帮助你把今天的市场观察沉淀到复盘模板里。"
+    )
+
+
+def sanitize_daily_review_actions(raw_actions: object, review_id: int) -> list[AiAction]:
+    """Validate LLM daily-review actions and keep only safe pending writes."""
+    allowed = {
+        "update_daily_review_section",
+        "create_daily_review_action",
+        "link_evidence_to_daily_review",
+        "create_check_item",
+        "create_review",
+    }
+    if not isinstance(raw_actions, list):
+        return []
+    actions: list[AiAction] = []
+    for raw_action in raw_actions[:4]:
+        if not isinstance(raw_action, dict):
+            continue
+        action_type = raw_action.get("type")
+        payload = raw_action.get("payload")
+        if action_type not in allowed or not isinstance(payload, dict):
+            continue
+        payload["daily_review_id"] = review_id
+        actions.append(AiAction(type=str(action_type), payload=payload))
+    return actions
+
+
+def call_llm_daily_review_ai(prompt: str, review_id: int) -> tuple[str, list[AiAction]] | None:
+    """Call the configured LLM for daily reviews with daily-review action validation."""
+    provider = get_llm_provider()
+    if provider is None:
+        return None
+
+    try:
+        response = provider.complete(LLMRequest(prompt=prompt))
+        data = parse_llm_json(response.text)
+        reply = data.get("reply")
+        if not isinstance(reply, str):
+            return None
+        actions = sanitize_daily_review_actions(data.get("actions"), review_id)
+        return reply, actions
+    except (LLMProviderError, TypeError):
+        return None
+
+
+@app.post("/api/v1/daily-reviews/{review_id}/ai/coach", response_model=DailyReviewCoachResponse)
+async def coach_daily_review(
+    review_id: int,
+    request: DailyReviewCoachRequest,
+    db: DbSession,
+) -> DailyReviewCoachResponse:
+    """Guide a user through one daily review section and return pending actions."""
+    review = get_daily_review_or_404(review_id, db)
+    context_items, evidence_cards = collect_daily_review_context(review, db)
+    has_external_evidence = any(card.source_level in {"A", "B", "C"} for card in evidence_cards)
+    prompt = build_daily_review_coach_prompt(
+        review=review,
+        message=request.message,
+        section_key=request.section_key,
+        context_items=context_items,
+        evidence_cards=evidence_cards,
+    )
+    llm_result = call_llm_daily_review_ai(prompt, review_id)
+    if llm_result:
+        reply, actions = llm_result
+        if not actions:
+            actions = build_local_daily_review_actions(
+                request.message,
+                review_id,
+                request.section_key,
+                has_external_evidence,
+            )
+    else:
+        reply = build_local_daily_review_reply(has_external_evidence)
+        actions = build_local_daily_review_actions(
+            request.message,
+            review_id,
+            request.section_key,
+            has_external_evidence,
+        )
+    return DailyReviewCoachResponse(reply=reply, actions=actions, evidence_cards=evidence_cards)
+
+
+@app.post("/api/v1/daily-reviews/{review_id}/actions/apply", response_model=AiActionApplyResponse)
+async def apply_daily_review_action(
+    review_id: int,
+    request: AiActionApplyRequest,
+    db: DbSession,
+) -> AiActionApplyResponse:
+    """Apply a user-confirmed daily review action."""
+    review = get_daily_review_or_404(review_id, db)
+    payload = request.payload
+    if request.type == "update_daily_review_section":
+        section_key = payload.get("section_key")
+        patch = payload.get("patch")
+        if not isinstance(section_key, str) or not isinstance(patch, dict):
+            raise HTTPException(status_code=422, detail="payload.section_key and payload.patch are required")
+        normalize_daily_review_content(review)
+        current_section = review.content.get(section_key)
+        if not isinstance(current_section, dict):
+            raise HTTPException(status_code=422, detail=f"Unknown daily review section: {section_key}")
+        next_content = dict(review.content)
+        next_content[section_key] = deep_merge_dict(current_section, patch)
+        review.content = next_content
+        review.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(review)
+        normalize_daily_review_content(review)
+        return AiActionApplyResponse(
+            type=request.type,
+            result=DailyReviewResponse.model_validate(review).model_dump(mode="json"),
+        )
+
+    if request.type == "create_daily_review_action":
+        section_key = payload.get("section_key")
+        content_text = payload.get("content")
+        if not isinstance(section_key, str) or not isinstance(content_text, str):
+            raise HTTPException(status_code=422, detail="payload.section_key and payload.content are required")
+        normalize_daily_review_content(review)
+        section = review.content.get(section_key)
+        if not isinstance(section, dict):
+            raise HTTPException(status_code=422, detail=f"Unknown daily review section: {section_key}")
+        actions = section.get("ai_actions")
+        if not isinstance(actions, list):
+            actions = []
+        actions.append(
+            {
+                "content": content_text,
+                "source": payload.get("source") if isinstance(payload.get("source"), str) else SOURCE_AI,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+        )
+        section["ai_actions"] = actions
+        next_content = dict(review.content)
+        next_content[section_key] = section
+        review.content = next_content
+        review.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(review)
+        return AiActionApplyResponse(
+            type=request.type,
+            result=DailyReviewResponse.model_validate(review).model_dump(mode="json"),
+        )
+
+    if request.type == "link_evidence_to_daily_review":
+        section_key = payload.get("section_key")
+        evidence = payload.get("evidence")
+        if not isinstance(section_key, str) or not isinstance(evidence, dict):
+            raise HTTPException(status_code=422, detail="payload.section_key and payload.evidence are required")
+        normalize_daily_review_content(review)
+        section = review.content.get(section_key)
+        if not isinstance(section, dict):
+            raise HTTPException(status_code=422, detail=f"Unknown daily review section: {section_key}")
+        linked = section.get("linked_evidence")
+        if not isinstance(linked, list):
+            linked = []
+        linked.append(evidence)
+        section["linked_evidence"] = linked
+        next_content = dict(review.content)
+        next_content[section_key] = section
+        review.content = next_content
+        review.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(review)
+        return AiActionApplyResponse(
+            type=request.type,
+            result=DailyReviewResponse.model_validate(review).model_dump(mode="json"),
+        )
+
+    if request.type == "create_check_item":
+        stock_code = payload.get("stock_code")
+        if not isinstance(stock_code, str):
+            raise HTTPException(status_code=422, detail="payload.stock_code is required")
+        get_stock_or_404(stock_code, db)
+        check_item = CheckItem(
+            user_id="default",
+            stock_code=stock_code,
+            content=_string_payload(payload.get("content")),
+            due_date=_parse_date(payload.get("due_date")),
+            source_type=_string_payload(payload.get("source_type"), "daily_review_ai"),
+            linked_hypothesis_id=payload.get("linked_hypothesis_id")
+            if isinstance(payload.get("linked_hypothesis_id"), int)
+            else None,
+        )
+        db.add(check_item)
+        db.commit()
+        db.refresh(check_item)
+        return AiActionApplyResponse(
+            type=request.type,
+            result=CheckItemResponse.model_validate(check_item).model_dump(mode="json"),
+        )
+
+    if request.type == "create_review":
+        stock_code = payload.get("stock_code")
+        if not isinstance(stock_code, str):
+            raise HTTPException(status_code=422, detail="payload.stock_code is required")
+        get_stock_or_404(stock_code, db)
+        stock_review = ReviewLog(
+            user_id="default",
+            stock_code=stock_code,
+            review_type=_string_payload(payload.get("review_type"), "daily_review"),
+            title=payload.get("title") if isinstance(payload.get("title"), str) else None,
+            content=_string_payload(payload.get("content")),
+            conclusions=payload.get("conclusions") if isinstance(payload.get("conclusions"), str) else None,
+            action_items=payload.get("action_items") if isinstance(payload.get("action_items"), list) else [],
+            trigger_event_id=payload.get("trigger_event_id")
+            if isinstance(payload.get("trigger_event_id"), int)
+            else None,
+        )
+        db.add(stock_review)
+        db.commit()
+        db.refresh(stock_review)
+        return AiActionApplyResponse(
+            type=request.type,
+            result=ReviewResponse.model_validate(stock_review).model_dump(mode="json"),
+        )
+
+    raise HTTPException(status_code=422, detail=f"Unsupported daily review action type: {request.type}")
+
+
 
 SOURCE_LEVELS: dict[str, dict[str, int | str]] = {
     "A": {
@@ -576,6 +1285,15 @@ def _parse_date(value: object) -> date | None:
     if isinstance(value, str):
         return date.fromisoformat(value)
     raise HTTPException(status_code=422, detail="Invalid date value")
+
+
+def _model_date(value: object) -> date:
+    """Convert an ORM date-ish value into a stdlib date for type checkers and JSON text."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 
 def _string_payload(value: object, fallback: str = "") -> str:

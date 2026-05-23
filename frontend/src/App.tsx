@@ -1,5 +1,5 @@
 ﻿import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react'
-import { BookOpen, Building2, CheckCircle2, Database, Plus, RefreshCw, RotateCcw, Trash2, X } from 'lucide-react'
+import { BookOpen, Building2, CalendarDays, CheckCircle2, Database, Plus, RefreshCw, RotateCcw, Save, Trash2, X } from 'lucide-react'
 import { applyAiAction, chatWithAi, type AiAction } from './services/aiService'
 import {
   listEvents,
@@ -13,6 +13,14 @@ import {
   type MarketEvent,
   type QuoteSnapshot,
 } from './services/dataService'
+import {
+  applyDailyReviewAction,
+  coachDailyReview,
+  initializeDailyReview,
+  prefillDailyReview,
+  updateDailyReview,
+  type DailyReview,
+} from './services/dailyReviewService'
 import {
   createCheckItem,
   createHypothesis,
@@ -81,6 +89,17 @@ const SOURCE_LEVEL_CLASSES: Record<string, string> = {
   D: 'border-slate-200 bg-slate-100 text-slate-600',
 }
 
+const DAILY_SECTIONS = [
+  { key: 'index_review', label: '指数复盘', hint: '判断市场大风格' },
+  { key: 'hotspot_review', label: '热点复盘', hint: '锁定主线板块' },
+  { key: 'capital_review', label: '资金复盘', hint: '跟踪主力动向' },
+  { key: 'limit_review', label: '涨跌停复盘', hint: '识别机会与风险' },
+  { key: 'watchlist_review', label: '自选股复盘', hint: '精细化找观察点' },
+  { key: 'fundamental_review', label: '基本面复盘', hint: '验证持仓质地' },
+  { key: 'tomorrow_plan', label: '今日判断与明日计划', hint: '沉淀触发条件' },
+  { key: 'weekly_review', label: '周末系统复盘', hint: '每周归因与计划' },
+]
+
 function StatusBadge({ status }: { status: string }) {
   return (
     <span className={`rounded-full border px-2 py-0.5 text-xs ${STATUS_CLASSES[status] ?? STATUS_CLASSES.unverified}`}>
@@ -93,7 +112,36 @@ function getText(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+function todayString(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function readField(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number') return String(value)
+  if (value && typeof value === 'object' && 'value' in value) {
+    const inner = (value as Record<string, unknown>).value
+    return typeof inner === 'string' || typeof inner === 'number' ? String(inner) : ''
+  }
+  return ''
+}
+
+function readSource(value: unknown): string {
+  if (value && typeof value === 'object' && 'source' in value) {
+    const source = (value as Record<string, unknown>).source
+    return typeof source === 'string' ? source : 'manual'
+  }
+  return 'manual'
+}
+
+function sourceLabel(source: string): string {
+  if (source === 'data_prefilled') return '已由数据预填'
+  if (source === 'ai_generated') return 'AI 整理'
+  if (source === 'insufficient_evidence') return '当前证据不足'
+  return '需要手动填写'
+}
+
 function App() {
+  const [viewMode, setViewMode] = useState<'company' | 'daily'>('company')
   const [stocks, setStocks] = useState<Stock[]>([])
   const [selectedCode, setSelectedCode] = useState<string | null>(null)
   const [hypotheses, setHypotheses] = useState<Hypothesis[]>([])
@@ -126,6 +174,18 @@ function App() {
   const [evidenceCards, setEvidenceCards] = useState<EvidenceCard[]>([])
   const [aiError, setAiError] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
+  const [dailyDate, setDailyDate] = useState(todayString())
+  const [dailyReview, setDailyReview] = useState<DailyReview | null>(null)
+  const [dailyLoading, setDailyLoading] = useState(false)
+  const [dailyPrefillLoading, setDailyPrefillLoading] = useState(false)
+  const [dailyMessage, setDailyMessage] = useState('')
+  const [dailySectionKey, setDailySectionKey] = useState('index_review')
+  const [dailyReply, setDailyReply] = useState('')
+  const [dailyActions, setDailyActions] = useState<AiAction[]>([])
+  const [dailyEvidenceCards, setDailyEvidenceCards] = useState<EvidenceCard[]>([])
+  const [dailyError, setDailyError] = useState('')
+  const [dailyAiLoading, setDailyAiLoading] = useState(false)
+  const [prefillSummary, setPrefillSummary] = useState('')
 
   const selectedStock = useMemo(
     () => stocks.find((stock) => stock.code === selectedCode) ?? null,
@@ -330,6 +390,84 @@ function App() {
     setAiError('')
   }
 
+  const handleInitializeDailyReview = async () => {
+    setDailyLoading(true)
+    setDailyError('')
+    try {
+      const review = await initializeDailyReview(dailyDate)
+      setDailyReview(review)
+      setDailyReply('')
+      setDailyActions([])
+      setPrefillSummary('')
+    } catch (err) {
+      setDailyError(err instanceof Error ? err.message : '创建每日复盘失败')
+    } finally {
+      setDailyLoading(false)
+    }
+  }
+
+  const handleUpdateDailyMeta = async (patch: {
+    status?: string
+    market_style?: string | null
+    main_sector?: string | null
+    sentiment?: string | null
+  }) => {
+    if (!dailyReview) return
+    setDailyError('')
+    try {
+      const next = await updateDailyReview(dailyReview.id, patch)
+      setDailyReview(next)
+    } catch (err) {
+      setDailyError(err instanceof Error ? err.message : '保存每日复盘失败')
+    }
+  }
+
+  const handlePrefillDailyReview = async () => {
+    if (!dailyReview) return
+    setDailyPrefillLoading(true)
+    setDailyError('')
+    try {
+      const result = await prefillDailyReview(dailyReview.id)
+      setDailyReview(result.review)
+      setDailyEvidenceCards(result.evidenceCards)
+      setPrefillSummary(`已预填自选股 ${result.filled.watchlist_targets ?? 0} 条、公司基本面 ${result.filled.company_rows ?? 0} 条；仍需手动补充：${result.missing.join('、')}`)
+    } catch (err) {
+      setDailyError(err instanceof Error ? err.message : '数据预填失败')
+    } finally {
+      setDailyPrefillLoading(false)
+    }
+  }
+
+  const handleDailyAiSubmit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!dailyReview || !dailyMessage.trim()) return
+    setDailyAiLoading(true)
+    setDailyError('')
+    try {
+      const response = await coachDailyReview(dailyReview.id, dailySectionKey, dailyMessage.trim())
+      setDailyReply(response.reply)
+      setDailyActions(response.actions)
+      setDailyEvidenceCards(response.evidenceCards)
+      setDailyMessage('')
+    } catch (err) {
+      setDailyError(err instanceof Error ? err.message : 'AI 复盘教练生成失败')
+    } finally {
+      setDailyAiLoading(false)
+    }
+  }
+
+  const handleApplyDailyAction = async (action: AiAction, index: number) => {
+    if (!dailyReview) return
+    setDailyError('')
+    try {
+      const next = await applyDailyReviewAction(dailyReview.id, action)
+      setDailyReview(next)
+      setDailyActions((current) => current.filter((_, itemIndex) => itemIndex !== index))
+    } catch (err) {
+      setDailyError(err instanceof Error ? err.message : '保存每日复盘成果失败')
+    }
+  }
+
   return (
     <div className="flex h-screen min-w-[1366px] bg-slate-50">
       <aside className="h-screen w-[280px] shrink-0 border-r border-slate-200 bg-white">
@@ -337,6 +475,26 @@ function App() {
           <h1 className="text-lg font-bold text-slate-900">A股基本面复盘助手</h1>
           <p className="mt-1 text-xs text-slate-500">股票 → 假设 → 检查项 → 复盘</p>
         </div>
+        <nav className="border-b border-slate-100 p-3">
+          <button
+            onClick={() => setViewMode('company')}
+            className={`mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium ${
+              viewMode === 'company' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            <Building2 className="h-4 w-4" />
+            公司研究
+          </button>
+          <button
+            onClick={() => setViewMode('daily')}
+            className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium ${
+              viewMode === 'daily' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            <CalendarDays className="h-4 w-4" />
+            每日复盘
+          </button>
+        </nav>
         <div className="p-4">
           <button
             onClick={() => setShowAddStock(true)}
@@ -375,7 +533,22 @@ function App() {
       </aside>
 
       <main className="h-screen flex-1 overflow-y-auto p-6">
-        {!selectedStock ? (
+        {viewMode === 'daily' ? (
+          <DailyReviewWorkspace
+            reviewDate={dailyDate}
+            onDateChange={setDailyDate}
+            review={dailyReview}
+            loading={dailyLoading}
+            prefillLoading={dailyPrefillLoading}
+            error={dailyError}
+            prefillSummary={prefillSummary}
+            sectionKey={dailySectionKey}
+            onSectionChange={setDailySectionKey}
+            onInitialize={() => void handleInitializeDailyReview()}
+            onPrefill={() => void handlePrefillDailyReview()}
+            onMetaChange={(patch) => void handleUpdateDailyMeta(patch)}
+          />
+        ) : !selectedStock ? (
           <div className="flex h-full items-center justify-center text-center">
             <div>
               <Building2 className="mx-auto mb-4 h-12 w-12 text-slate-300" />
@@ -634,6 +807,23 @@ function App() {
       </main>
 
       <aside className="flex h-screen w-[400px] shrink-0 flex-col border-l border-slate-200 bg-white">
+        {viewMode === 'daily' ? (
+          <DailyReviewAiPanel
+            review={dailyReview}
+            sectionKey={dailySectionKey}
+            message={dailyMessage}
+            reply={dailyReply}
+            actions={dailyActions}
+            evidenceCards={dailyEvidenceCards}
+            error={dailyError}
+            loading={dailyAiLoading}
+            onMessageChange={setDailyMessage}
+            onSubmit={(event) => void handleDailyAiSubmit(event)}
+            onApply={(action, index) => void handleApplyDailyAction(action, index)}
+            onDismiss={(index) => setDailyActions((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+          />
+        ) : (
+          <>
         <header className="shrink-0 border-b border-slate-200 px-4 py-4">
           <h2 className="text-base font-semibold text-slate-900">AI 复盘引导器</h2>
           <p className="mt-1 text-xs text-slate-500">先看证据边界，再把想法变成可保存成果</p>
@@ -705,6 +895,8 @@ function App() {
             {aiLoading ? '整理中...' : '生成可保存成果'}
           </button>
         </form>
+          </>
+        )}
       </aside>
 
       {showAddStock && (
@@ -761,6 +953,464 @@ function App() {
         </div>
       )}
     </div>
+  )
+}
+
+function DailyReviewWorkspace({
+  reviewDate,
+  onDateChange,
+  review,
+  loading,
+  prefillLoading,
+  error,
+  prefillSummary,
+  sectionKey,
+  onSectionChange,
+  onInitialize,
+  onPrefill,
+  onMetaChange,
+}: {
+  reviewDate: string
+  onDateChange: (value: string) => void
+  review: DailyReview | null
+  loading: boolean
+  prefillLoading: boolean
+  error: string
+  prefillSummary: string
+  sectionKey: string
+  onSectionChange: (value: string) => void
+  onInitialize: () => void
+  onPrefill: () => void
+  onMetaChange: (patch: { status?: string; market_style?: string | null; main_sector?: string | null; sentiment?: string | null }) => void
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900">每日复盘工作台</h2>
+          <p className="mt-1 text-sm text-slate-500">按固定框架复盘市场、主线、自选股和基本面证据</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="date"
+            value={reviewDate}
+            onChange={(event) => onDateChange(event.target.value)}
+            className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
+          />
+          <button
+            onClick={onInitialize}
+            disabled={loading}
+            className="flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            <CalendarDays className="h-4 w-4" />
+            {loading ? '创建中' : '打开复盘'}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+
+      {!review ? (
+        <div className="flex min-h-[520px] items-center justify-center rounded-lg border border-slate-200 bg-white text-center">
+          <div>
+            <CalendarDays className="mx-auto mb-4 h-12 w-12 text-slate-300" />
+            <p className="text-sm text-slate-500">选择日期后打开每日复盘模板</p>
+          </div>
+        </div>
+      ) : (
+        <>
+          <section className="rounded-lg border border-slate-200 bg-white p-5">
+            <div className="grid grid-cols-[120px_1fr_1fr_1fr_140px] gap-3">
+              <select
+                value={review.status}
+                onChange={(event) => onMetaChange({ status: event.target.value })}
+                className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
+              >
+                <option value="draft">草稿</option>
+                <option value="completed">已完成</option>
+              </select>
+              <input
+                value={review.marketStyle ?? ''}
+                onChange={(event) => onMetaChange({ market_style: event.target.value || null })}
+                placeholder="市场风格，如 小盘/科技/均衡"
+                className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
+              />
+              <input
+                value={review.mainSector ?? ''}
+                onChange={(event) => onMetaChange({ main_sector: event.target.value || null })}
+                placeholder="主线板块，如 AI 算力"
+                className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
+              />
+              <input
+                value={review.sentiment ?? ''}
+                onChange={(event) => onMetaChange({ sentiment: event.target.value || null })}
+                placeholder="情绪，如 强/弱/分歧"
+                className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
+              />
+              <button
+                onClick={onPrefill}
+                disabled={prefillLoading}
+                className="flex h-9 items-center justify-center gap-1.5 rounded-lg border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-4 w-4 ${prefillLoading ? 'animate-spin' : ''}`} />
+                数据预填
+              </button>
+            </div>
+            {prefillSummary && (
+              <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm leading-relaxed text-blue-800">
+                {prefillSummary}
+              </div>
+            )}
+          </section>
+
+          <div className="grid grid-cols-[220px_1fr] gap-4">
+            <section className="rounded-lg border border-slate-200 bg-white p-3">
+              <div className="mb-2 px-2 text-xs font-medium text-slate-500">复盘框架</div>
+              <div className="space-y-1">
+                {DAILY_SECTIONS.map((section) => (
+                  <button
+                    key={section.key}
+                    onClick={() => onSectionChange(section.key)}
+                    className={`w-full rounded-lg px-3 py-2 text-left ${
+                      sectionKey === section.key ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="text-sm font-medium">{section.label}</div>
+                    <div className="mt-0.5 text-xs opacity-75">{section.hint}</div>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <DailyReviewSection review={review} sectionKey={sectionKey} />
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function DailyReviewSection({ review, sectionKey }: { review: DailyReview; sectionKey: string }) {
+  const section = review.content[sectionKey]
+  const sectionInfo = DAILY_SECTIONS.find((item) => item.key === sectionKey)
+  const records = section && typeof section === 'object' ? (section as Record<string, unknown>) : {}
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5">
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-semibold text-slate-900">{sectionInfo?.label ?? sectionKey}</h3>
+          <p className="mt-1 text-sm text-slate-500">{sectionInfo?.hint}</p>
+        </div>
+        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-500">
+          {review.reviewDate}
+        </span>
+      </div>
+      <div className="space-y-4">
+        {renderDailySectionContent(sectionKey, records)}
+      </div>
+    </section>
+  )
+}
+
+function renderDailySectionContent(sectionKey: string, records: Record<string, unknown>) {
+  if (sectionKey === 'watchlist_review') {
+    const pool = records.pool_status as Record<string, unknown> | undefined
+    const targets = Array.isArray(records.targets) ? records.targets as Record<string, unknown>[] : []
+    return (
+      <>
+        <div className="grid grid-cols-3 gap-3">
+          <TraceField label="关注股票数" value={pool?.holding_count} />
+          <TraceField label="本月调入" value={pool?.monthly_added} />
+          <TraceField label="本月调出" value={pool?.monthly_removed} />
+        </div>
+        <DailyTable
+          empty="暂无自选股数据，点击数据预填后会从关注股票生成。"
+          headers={['标的', '技术形态', '日线趋势', '基本面变化']}
+          rows={targets.map((item) => [
+            `${item.stock_name ?? ''} ${item.stock_code ?? ''}`,
+            readField(item.technical_shape),
+            readField(item.daily_trend),
+            readField(item.fundamental_change),
+          ])}
+        />
+      </>
+    )
+  }
+
+  if (sectionKey === 'fundamental_review') {
+    const rows = Array.isArray(records.company_rows) ? records.company_rows as Record<string, unknown>[] : []
+    const risks = Array.isArray(records.risk_checklist) ? records.risk_checklist as Record<string, unknown>[] : []
+    return (
+      <>
+        <DailyTable
+          empty="暂无公司基本面数据，点击数据预填后会从公告、新闻、指标和行情快照生成。"
+          headers={['标的', '公告/新闻', '财务风险', '估值位置']}
+          rows={rows.map((item) => [
+            `${item.stock_name ?? ''} ${item.stock_code ?? ''}`,
+            readField(item.announcement_news),
+            readField(item.financial_risk),
+            readField(item.valuation_position),
+          ])}
+        />
+        <div className="grid grid-cols-2 gap-3">
+          {risks.map((risk) => (
+            <div key={String(risk.label)} className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700">
+              {String(risk.label)}
+            </div>
+          ))}
+        </div>
+      </>
+    )
+  }
+
+  if (sectionKey === 'index_review') {
+    const indices = Array.isArray(records.indices) ? records.indices as Record<string, unknown>[] : []
+    return (
+      <>
+        <DailyTable
+          empty="暂无指数数据，第一版需要手动填写。"
+          headers={['指数', '涨跌幅', '成交额', '备注']}
+          rows={indices.map((item) => [
+            String(item.name ?? ''),
+            readField(item.change_pct),
+            readField(item.turnover),
+            readField(item.note),
+          ])}
+        />
+        <div className="grid grid-cols-3 gap-3">
+          <TraceField label="领涨指数" value={records.leading_index} />
+          <TraceField label="市场风格" value={records.market_style} />
+          <TraceField label="外部影响" value={records.external_impact} />
+        </div>
+      </>
+    )
+  }
+
+  if (sectionKey === 'hotspot_review') {
+    const metrics = records.sentiment_metrics as Record<string, unknown> | undefined
+    const sectors = Array.isArray(records.main_sectors) ? records.main_sectors as Record<string, unknown>[] : []
+    return (
+      <>
+        <div className="grid grid-cols-4 gap-3">
+          <TraceField label="涨停家数" value={metrics?.limit_up_count} />
+          <TraceField label="跌停家数" value={metrics?.limit_down_count} />
+          <TraceField label="连板高度" value={metrics?.streak_height} />
+          <TraceField label="炸板率" value={metrics?.failed_board_rate} />
+        </div>
+        <DailyTable
+          empty="暂无主线板块记录，可让 AI 根据你的观察整理。"
+          headers={['板块', '龙头股', '驱动逻辑', '持续性']}
+          rows={sectors.map((item) => [
+            readField(item.sector),
+            readField(item.leader),
+            readField(item.driver),
+            readField(item.sustainability),
+          ])}
+        />
+      </>
+    )
+  }
+
+  if (sectionKey === 'capital_review') {
+    const leaders = Array.isArray(records.turnover_leaders) ? records.turnover_leaders as Record<string, unknown>[] : []
+    return (
+      <>
+        <DailyTable
+          empty="暂无资金流数据，可点击数据预填从板块资金流榜单生成。"
+          headers={['标的/板块', '净额', '类型', '主力意图']}
+          rows={leaders.map((item) => [
+            readField(item.target),
+            readField(item.amount),
+            readField(item.sector),
+            readField(item.intent),
+          ])}
+        />
+        <div className="grid grid-cols-1 gap-3">
+          <TraceField label="资金扎堆方向" value={records.capital_direction} />
+        </div>
+      </>
+    )
+  }
+
+  if (sectionKey === 'limit_review') {
+    const risks = Array.isArray(records.risk_rows) ? records.risk_rows as Record<string, unknown>[] : []
+    const opportunities = Array.isArray(records.opportunity_rows) ? records.opportunity_rows as Record<string, unknown>[] : []
+    return (
+      <>
+        <div className="text-sm font-medium text-slate-700">跌幅榜 — 排雷优先</div>
+        <DailyTable
+          empty="暂无跌停股池数据。"
+          headers={['标的', '跌幅', '所属板块', '原因']}
+          rows={risks.map((item) => [
+            readField(item.stock),
+            readField(item.change_pct),
+            readField(item.sector),
+            readField(item.reason),
+          ])}
+        />
+        <div className="text-sm font-medium text-slate-700">涨停榜 — 找共性</div>
+        <DailyTable
+          empty="暂无涨停股池数据。"
+          headers={['标的', '连板', '所属板块', '驱动原因']}
+          rows={opportunities.map((item) => [
+            readField(item.stock),
+            readField(item.streak),
+            readField(item.sector),
+            readField(item.driver),
+          ])}
+        />
+        <div className="grid grid-cols-1 gap-3">
+          <TraceField label="共性总结" value={records.common_summary} />
+        </div>
+      </>
+    )
+  }
+
+  if (sectionKey === 'tomorrow_plan') {
+    return (
+      <div className="grid grid-cols-2 gap-3">
+        <TraceField label="明日市场判断" value={records.market_view} />
+        <TraceField label="仓位计划" value={records.position_plan} />
+        <TraceField label="重点关注板块" value={Array.isArray(records.focus_sectors) ? records.focus_sectors.join('、') : records.focus_sectors} />
+        <TraceField label="今日教训" value={records.lessons} />
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      {Object.entries(records).map(([key, value]) => (
+        <TraceField key={key} label={key} value={value} />
+      ))}
+    </div>
+  )
+}
+
+function TraceField({ label, value }: { label: string; value: unknown }) {
+  const source = readSource(value)
+  return (
+    <div className="rounded-lg border border-slate-200 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-slate-500">{label}</span>
+        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">{sourceLabel(source)}</span>
+      </div>
+      <div className="min-h-[20px] text-sm leading-relaxed text-slate-800">{readField(value) || '待补充'}</div>
+    </div>
+  )
+}
+
+function DailyTable({ empty, headers, rows }: { empty: string; headers: string[]; rows: string[][] }) {
+  if (rows.length === 0) return <EmptyText text={empty} />
+  return (
+    <table className="w-full text-sm">
+      <thead className="border-b border-slate-200">
+        <tr className="text-xs text-slate-500">
+          {headers.map((header) => (
+            <th key={header} className="px-3 py-2 text-left font-medium">{header}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-slate-100">
+        {rows.map((row, rowIndex) => (
+          <tr key={rowIndex} className="hover:bg-slate-50">
+            {row.map((cell, cellIndex) => (
+              <td key={`${rowIndex}-${cellIndex}`} className="px-3 py-2 text-slate-700">{cell || '待补充'}</td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function DailyReviewAiPanel({
+  review,
+  sectionKey,
+  message,
+  reply,
+  actions,
+  evidenceCards,
+  error,
+  loading,
+  onMessageChange,
+  onSubmit,
+  onApply,
+  onDismiss,
+}: {
+  review: DailyReview | null
+  sectionKey: string
+  message: string
+  reply: string
+  actions: AiAction[]
+  evidenceCards: EvidenceCard[]
+  error: string
+  loading: boolean
+  onMessageChange: (value: string) => void
+  onSubmit: (event: FormEvent) => void
+  onApply: (action: AiAction, index: number) => void
+  onDismiss: (index: number) => void
+}) {
+  const section = DAILY_SECTIONS.find((item) => item.key === sectionKey)
+  return (
+    <>
+      <header className="shrink-0 border-b border-slate-200 px-4 py-4">
+        <h2 className="text-base font-semibold text-slate-900">AI 每日复盘教练</h2>
+        <p className="mt-1 text-xs text-slate-500">围绕当前 section 追问，并生成待保存成果</p>
+      </header>
+      <div className="flex-1 overflow-y-auto p-4">
+        {!review ? (
+          <EmptyText text="先打开当天复盘模板" />
+        ) : (
+          <div className="space-y-4">
+            <div className="rounded-lg bg-slate-50 p-3 text-sm leading-relaxed text-slate-600">
+              当前复盘：<span className="font-medium text-slate-900">{review.reviewDate}</span>
+              <br />
+              当前模块：<span className="font-medium text-slate-900">{section?.label}</span>
+            </div>
+            {reply && <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-sm leading-relaxed text-blue-800">{reply}</div>}
+            {error && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm leading-relaxed text-red-700">{error}</div>}
+            {evidenceCards.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
+                  <Database className="h-4 w-4" />
+                  本次使用证据
+                </div>
+                {evidenceCards.slice(0, 5).map((card, index) => (
+                  <EvidenceCardView key={`${card.sourceProvider}-${index}`} card={card} compact />
+                ))}
+              </div>
+            )}
+            <div className="space-y-3">
+              {actions.map((action, index) => (
+                <AiActionCard
+                  key={`${action.type}-${index}`}
+                  action={action}
+                  onApply={() => onApply(action, index)}
+                  onDismiss={() => onDismiss(index)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <form onSubmit={onSubmit} className="shrink-0 border-t border-slate-200 p-4">
+        <textarea
+          value={message}
+          onChange={(event) => onMessageChange(event.target.value)}
+          placeholder="例如：今天 AI 算力继续扩散，但成交额集中度不够，我不确定是不是主线"
+          className="min-h-[88px] w-full resize-none rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+          disabled={!review || loading}
+        />
+        <button
+          className="mt-3 flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-blue-600 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!review || loading || !message.trim()}
+        >
+          <Save className="h-4 w-4" />
+          {loading ? '整理中...' : '生成复盘成果'}
+        </button>
+      </form>
+    </>
   )
 }
 
@@ -875,6 +1525,12 @@ function AiActionCard({
           ? '创建复盘记录'
           : action.type === 'update_hypothesis_status'
             ? '更新假设状态'
+            : action.type === 'update_daily_review_section'
+              ? '更新每日复盘模块'
+              : action.type === 'create_daily_review_action'
+                ? '新增复盘观察项'
+                : action.type === 'link_evidence_to_daily_review'
+                  ? '关联证据到复盘'
             : action.type
 
   const description = getActionDescription(action)
@@ -910,6 +1566,15 @@ function getActionDescription(action: AiAction): string {
   }
   if (action.type === 'update_hypothesis_status') {
     return typeof action.payload.reason === 'string' ? action.payload.reason : '更新一条假设的状态'
+  }
+  if (action.type === 'update_daily_review_section') {
+    return typeof action.payload.section_key === 'string' ? `更新 ${action.payload.section_key} 模块` : '更新每日复盘模块'
+  }
+  if (action.type === 'create_daily_review_action') {
+    return typeof action.payload.content === 'string' ? action.payload.content : '新增一条复盘观察项'
+  }
+  if (action.type === 'link_evidence_to_daily_review') {
+    return '把这条证据关联到当前每日复盘模块'
   }
   if (typeof action.payload.content === 'string') {
     return action.payload.content

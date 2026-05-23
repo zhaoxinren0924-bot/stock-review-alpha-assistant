@@ -268,6 +268,28 @@ class ReviewLog(Base):
     )
 
 
+class DailyReview(Base):
+    """Structured daily market review workflow."""
+
+    __tablename__ = "daily_reviews"
+    __table_args__ = (UniqueConstraint("user_id", "review_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="default"
+    )
+    review_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    market_style: Mapped[str | None] = mapped_column(String(50))
+    main_sector: Mapped[str | None] = mapped_column(String(100))
+    sentiment: Mapped[str | None] = mapped_column(String(50))
+    content: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class UserRule(Base):
     """Personal investment rules."""
 

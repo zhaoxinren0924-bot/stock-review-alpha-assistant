@@ -23,9 +23,10 @@ async def create_test_stock(client: AsyncClient, stock_code: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ai_chat_without_external_evidence_is_explicitly_bounded() -> None:
+async def test_ai_chat_without_external_evidence_is_explicitly_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     """AI can organize user thought but must admit missing external evidence."""
     await create_tables()
+    monkeypatch.setattr("app.main.get_llm_provider", lambda: None)
     stock_code = "399993"
     transport = ASGITransport(app=app)
 
