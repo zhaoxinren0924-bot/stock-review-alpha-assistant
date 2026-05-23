@@ -1213,6 +1213,59 @@ def call_llm_daily_review_ai(prompt: str, review_id: int) -> tuple[str, list[AiA
         return None
 
 
+DAILY_REVIEW_DELETABLE_FIELDS = {"ai_notes", "ai_actions", "linked_evidence"}
+
+
+@app.delete(
+    "/api/v1/daily-reviews/{review_id}/sections/{section_key}/items/{field}/{index}",
+    response_model=DailyReviewResponse,
+)
+async def delete_daily_review_section_item(
+    review_id: int,
+    section_key: str,
+    field: str,
+    index: int,
+    db: DbSession,
+) -> DailyReviewResponse:
+    """Remove one saved AI-proposed item (ai_notes / ai_actions / linked_evidence)
+    from a daily review section by its position in the list."""
+    if field not in DAILY_REVIEW_DELETABLE_FIELDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"field must be one of {sorted(DAILY_REVIEW_DELETABLE_FIELDS)}",
+        )
+    if index < 0:
+        raise HTTPException(status_code=422, detail="index must be >= 0")
+    review = get_daily_review_or_404(review_id, db)
+    normalize_daily_review_content(review)
+    section = review.content.get(section_key)
+    if not isinstance(section, dict):
+        raise HTTPException(status_code=404, detail=f"Unknown daily review section: {section_key}")
+    items = section.get(field)
+    if not isinstance(items, list):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Section {section_key} has no {field} list",
+        )
+    if index >= len(items):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{field}[{index}] does not exist (length={len(items)})",
+        )
+    next_items = list(items)
+    next_items.pop(index)
+    next_section = dict(section)
+    next_section[field] = next_items
+    next_content = dict(review.content)
+    next_content[section_key] = next_section
+    review.content = next_content
+    review.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(review)
+    normalize_daily_review_content(review)
+    return DailyReviewResponse.model_validate(review)
+
+
 @app.post("/api/v1/daily-reviews/{review_id}/ai/coach", response_model=DailyReviewCoachResponse)
 async def coach_daily_review(
     review_id: int,

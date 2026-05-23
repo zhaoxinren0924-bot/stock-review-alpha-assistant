@@ -379,6 +379,64 @@ def test_collect_context_for_tomorrow_plan_condenses_other_sections() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_daily_review_section_item_removes_only_target() -> None:
+    """DELETE endpoint must pop only the indexed item from the requested field."""
+    await create_tables()
+    db = SessionLocal()
+    try:
+        db.query(DailyReview).filter(DailyReview.review_date == date(2026, 5, 26)).delete()
+        db.commit()
+        review = DailyReview(
+            user_id="default",
+            review_date=date(2026, 5, 26),
+            status="draft",
+            content={
+                "hotspot_review": {
+                    "ai_notes": [
+                        {"value": "笔记 A", "source": "ai_generated"},
+                        {"value": "笔记 B", "source": "ai_generated"},
+                        {"value": "笔记 C", "source": "ai_generated"},
+                    ],
+                    "ai_actions": [
+                        {"content": "继续验证 X", "source": "ai_generated"},
+                    ],
+                },
+            },
+        )
+        db.add(review)
+        db.commit()
+        db.refresh(review)
+        review_id = review.id
+    finally:
+        db.close()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Delete middle ai_notes entry (index 1).
+        res = await client.delete(
+            f"/api/v1/daily-reviews/{review_id}/sections/hotspot_review/items/ai_notes/1"
+        )
+        assert res.status_code == 200
+        notes = res.json()["content"]["hotspot_review"]["ai_notes"]
+        assert [n["value"] for n in notes] == ["笔记 A", "笔记 C"]
+        # ai_actions list is untouched.
+        actions = res.json()["content"]["hotspot_review"]["ai_actions"]
+        assert len(actions) == 1
+
+        # Out-of-range index returns 404.
+        oob = await client.delete(
+            f"/api/v1/daily-reviews/{review_id}/sections/hotspot_review/items/ai_notes/99"
+        )
+        assert oob.status_code == 404
+
+        # Disallowed field returns 422.
+        bad_field = await client.delete(
+            f"/api/v1/daily-reviews/{review_id}/sections/hotspot_review/items/indices/0"
+        )
+        assert bad_field.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_daily_review_ai_action_requires_apply(monkeypatch: pytest.MonkeyPatch) -> None:
     """AI coach returns pending actions, and apply mutates only after confirmation."""
     await create_tables()

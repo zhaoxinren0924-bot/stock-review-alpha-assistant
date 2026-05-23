@@ -168,6 +168,19 @@ export async function coachDailyReview(
   }
 }
 
+export async function deleteDailyReviewSectionItem(
+  id: number,
+  sectionKey: string,
+  field: 'ai_notes' | 'ai_actions' | 'linked_evidence',
+  index: number,
+): Promise<DailyReview> {
+  const data = await fetchApi<RawDailyReview>(
+    `/api/v1/daily-reviews/${id}/sections/${sectionKey}/items/${field}/${index}`,
+    { method: 'DELETE' },
+  )
+  return transformDailyReview(data)
+}
+
 export async function applyDailyReviewAction(id: number, action: AiAction): Promise<DailyReview> {
   const data = await fetchApi<{ result: RawDailyReview }>(`/api/v1/daily-reviews/${id}/actions/apply`, {
     method: 'POST',

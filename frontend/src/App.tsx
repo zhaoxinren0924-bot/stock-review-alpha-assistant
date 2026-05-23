@@ -16,6 +16,7 @@ import {
 import {
   applyDailyReviewAction,
   coachDailyReview,
+  deleteDailyReviewSectionItem,
   initializeDailyReview,
   prefillDailyReview,
   updateDailyReview,
@@ -463,6 +464,21 @@ function App() {
     }
   }
 
+  const handleDeleteDailySectionItem = async (
+    sectionKey: string,
+    field: 'ai_notes' | 'ai_actions' | 'linked_evidence',
+    index: number,
+  ) => {
+    if (!dailyReview) return
+    setDailyError('')
+    try {
+      const next = await deleteDailyReviewSectionItem(dailyReview.id, sectionKey, field, index)
+      setDailyReview(next)
+    } catch (err) {
+      setDailyError(err instanceof Error ? err.message : '删除待验证条目失败')
+    }
+  }
+
   const handleApplyDailyAction = async (action: AiAction, index: number) => {
     if (!dailyReview) return
     setDailyError('')
@@ -554,6 +570,9 @@ function App() {
             onInitialize={() => void handleInitializeDailyReview()}
             onPrefill={() => void handlePrefillDailyReview()}
             onMetaChange={(patch) => void handleUpdateDailyMeta(patch)}
+            onDeleteSectionItem={(sectionKey, field, index) =>
+              void handleDeleteDailySectionItem(sectionKey, field, index)
+            }
           />
         ) : !selectedStock ? (
           <div className="flex h-full items-center justify-center text-center">
@@ -1002,6 +1021,7 @@ function DailyReviewWorkspace({
   onInitialize,
   onPrefill,
   onMetaChange,
+  onDeleteSectionItem,
 }: {
   reviewDate: string
   onDateChange: (value: string) => void
@@ -1015,6 +1035,11 @@ function DailyReviewWorkspace({
   onInitialize: () => void
   onPrefill: () => void
   onMetaChange: (patch: { status?: string; market_style?: string | null; main_sector?: string | null; sentiment?: string | null }) => void
+  onDeleteSectionItem: (
+    sectionKey: string,
+    field: 'ai_notes' | 'ai_actions' | 'linked_evidence',
+    index: number,
+  ) => void
 }) {
   const [errorDismissed, setErrorDismissed] = useState(false)
   useEffect(() => {
@@ -1151,6 +1176,11 @@ function DailyReviewWorkspace({
                 hint={section.hint}
               >
                 <DailyReviewSection review={review} sectionKey={section.key} />
+                <DailyAiProposals
+                  review={review}
+                  sectionKey={section.key}
+                  onDelete={(field, idx) => onDeleteSectionItem(section.key, field, idx)}
+                />
                 {section.key === 'index_review' && (
                   <SectionMetaInput
                     label="市场风格(你的判断)"
@@ -1261,6 +1291,89 @@ function DailyReviewSection({ review, sectionKey }: { review: DailyReview; secti
   const section = review.content[sectionKey]
   const records = section && typeof section === 'object' ? (section as Record<string, unknown>) : {}
   return <div className="space-y-4">{renderDailySectionContent(sectionKey, records)}</div>
+}
+
+function DailyAiProposals({
+  review,
+  sectionKey,
+  onDelete,
+}: {
+  review: DailyReview
+  sectionKey: string
+  onDelete: (field: 'ai_notes' | 'ai_actions' | 'linked_evidence', index: number) => void
+}) {
+  const section = review.content[sectionKey] as Record<string, unknown> | undefined
+  const notes = Array.isArray(section?.ai_notes) ? (section!.ai_notes as Record<string, unknown>[]) : []
+  const actions = Array.isArray(section?.ai_actions) ? (section!.ai_actions as Record<string, unknown>[]) : []
+
+  if (notes.length === 0 && actions.length === 0) return null
+
+  return (
+    <div className="mt-2 space-y-3 rounded-lg border border-blue-100 bg-blue-50/40 p-3">
+      <div className="flex items-center gap-2 text-xs font-medium text-blue-700">
+        <Sparkles className="h-3.5 w-3.5" />
+        AI 提议(待验证,可删除)
+      </div>
+
+      {notes.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-xs font-medium text-slate-500">笔记</div>
+          {notes.map((note, idx) => (
+            <div
+              key={`note-${idx}`}
+              className="flex items-start justify-between gap-2 rounded-md bg-white px-3 py-2 text-sm text-slate-700 shadow-sm"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="break-words">{String(note.value ?? '')}</div>
+                {typeof note.created_at === 'string' && note.created_at && (
+                  <div className="mt-0.5 text-xs text-slate-400">
+                    {String(note.created_at).slice(0, 19).replace('T', ' ')}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => onDelete('ai_notes', idx)}
+                className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                aria-label="删除这条笔记"
+                title="删除"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {actions.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-xs font-medium text-slate-500">待验证动作</div>
+          {actions.map((action, idx) => (
+            <div
+              key={`action-${idx}`}
+              className="flex items-start justify-between gap-2 rounded-md bg-white px-3 py-2 text-sm text-slate-700 shadow-sm"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="break-words">{String(action.content ?? '')}</div>
+                {typeof action.created_at === 'string' && action.created_at && (
+                  <div className="mt-0.5 text-xs text-slate-400">
+                    {String(action.created_at).slice(0, 19).replace('T', ' ')}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => onDelete('ai_actions', idx)}
+                className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                aria-label="删除这条待验证动作"
+                title="删除"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function renderDailySectionContent(sectionKey: string, records: Record<string, unknown>) {
