@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from importlib import import_module
@@ -62,40 +63,78 @@ class DailyMarketPrefillService:
         ak: Any,
         review_date: date,
     ) -> tuple[dict[str, object], int, list[str], list[dict[str, str]]]:
-        indices = [
-            ("上证指数", "000001"),
-            ("深证成指", "399001"),
-            ("创业板指", "399006"),
-            ("科创50", "000688"),
-            ("中证2000", "932000"),
+        a_indices = [
+            ("上证指数", "sh000001"),
+            ("深证成指", "sz399001"),
+            ("创业板指", "sz399006"),
+            ("科创50", "sh000688"),
+            ("中证2000", "sh932000"),
+        ]
+        us_indices = [
+            ("纳斯达克", ".IXIC"),
+            ("标普500", ".INX"),
         ]
         rows: list[dict[str, object]] = []
-        missing = ["恒生指数", "纳斯达克", "标普500"]
+        missing = ["恒生指数"]
         errors: list[dict[str, str]] = []
-        start_date = (review_date - timedelta(days=12)).strftime("%Y%m%d")
-        end_date = review_date.strftime("%Y%m%d")
 
-        for name, symbol in indices:
+        for name, symbol in a_indices:
             try:
-                df = ak.index_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date)
+                df = ak.stock_zh_index_daily(symbol=symbol)
                 records = _records(df)
-                if not records:
+                if len(records) < 1:
                     rows.append(_index_row(name, "", "", "暂无数据", "insufficient_evidence"))
                     missing.append(name)
                     continue
-                row = records[-1]
+                today = records[-1]
+                close = _to_float(_first_value(today, ["close"]))
+                change_pct = ""
+                if len(records) >= 2 and close is not None:
+                    prev_close = _to_float(_first_value(records[-2], ["close"]))
+                    if prev_close:
+                        change_pct = f"{(close - prev_close) / prev_close * 100:.2f}%"
+                volume = _to_float(_first_value(today, ["volume"]))
+                turnover = ""
+                if volume is not None:
+                    # stock_zh_index_daily volume unit is "手" (lot), not amount
+                    turnover = _fmt_amount(volume) + "手" if volume else ""
+                direction = ""
+                if change_pct:
+                    direction = "涨" if _to_float(change_pct) > 0 else "跌" if _to_float(change_pct) < 0 else "平"
                 rows.append(
                     _index_row(
                         name,
-                        _fmt_percent(_first_value(row, ["涨跌幅", "change_pct"])),
-                        _fmt_amount(_first_value(row, ["成交额", "amount"])),
-                        f"收盘 {(_first_value(row, ['收盘', 'close']) or '暂无')}",
+                        direction,
+                        change_pct,
+                        turnover,
                         "data_prefilled",
                     )
                 )
             except Exception as exc:
                 errors.append({"provider": self.provider_name, "type": f"index:{name}", "message": str(exc)})
                 rows.append(_index_row(name, "", "", "接口失败", "insufficient_evidence"))
+                missing.append(name)
+
+        for name, symbol in us_indices:
+            try:
+                df = ak.index_us_stock_sina(symbol=symbol)
+                records = _records(df)
+                if len(records) < 1:
+                    missing.append(name)
+                    continue
+                today = records[-1]
+                close = _to_float(_first_value(today, ["close"]))
+                change_pct = ""
+                if len(records) >= 2 and close is not None:
+                    prev_close = _to_float(_first_value(records[-2], ["close"]))
+                    if prev_close:
+                        change_pct = f"{(close - prev_close) / prev_close * 100:.2f}%"
+                direction = ""
+                if change_pct:
+                    direction = "涨" if _to_float(change_pct) > 0 else "跌" if _to_float(change_pct) < 0 else "平"
+                rows.append(_index_row(name, direction, change_pct, "", "data_prefilled"))
+            except Exception as exc:
+                errors.append({"provider": self.provider_name, "type": f"index:{name}", "message": str(exc)})
                 missing.append(name)
 
         leading = ""
@@ -112,7 +151,7 @@ class DailyMarketPrefillService:
                 "indices": rows,
                 "leading_index": _field(leading, "data_prefilled" if leading else "insufficient_evidence"),
                 "market_style": _field("", "manual", "需要结合指数、板块和用户观察确认。"),
-                "external_impact": _field("", "insufficient_evidence", "境外指数第一版暂不自动采集。"),
+                "external_impact": _field("", "insufficient_evidence", "恒生指数暂未接入稳定数据源。"),
             },
             len([row for row in rows if _field_source(row["change_pct"]) == "data_prefilled"]),
             missing,
@@ -130,19 +169,27 @@ class DailyMarketPrefillService:
         dt_rows = self._safe_records(ak, "stock_zt_pool_dtgc_em", {"date": date_text}, "limit_down", errors)
         zbgc_rows = self._safe_records(ak, "stock_zt_pool_zbgc_em", {"date": date_text}, "failed_board", errors)
 
-        sectors = self._safe_records(ak, "stock_board_concept_name_em", {}, "concept_board", errors)
+        sectors = self._safe_records(ak, "stock_board_concept_name_em", {}, "concept_board", errors, retries=2, delay=3.0)
+        if not sectors:
+            # Fallback: try tonghuashun concept boards (names only, no limit-up stats)
+            sectors = self._safe_records(ak, "stock_board_concept_name_ths", {}, "concept_board_ths", errors, retries=1, delay=2.0)
         main_sectors: list[dict[str, object]] = []
         for row in sectors[:8]:
-            main_sectors.append(
-                {
-                    "sector": _field(_first_value(row, ["板块名称", "名称", "name"]) or ""),
-                    "limit_up_count": _field(_first_value(row, ["涨停家数", "涨停数"]) or "", "data_prefilled"),
-                    "leader": _field(_first_value(row, ["领涨股票", "龙头股"]) or "", "data_prefilled"),
-                    "driver": _field("", "manual", "驱动逻辑需要结合公告、新闻或用户观察。"),
-                    "sustainability": _field("", "manual", "持续性判断需要用户确认。"),
-                    "change_pct": _field(_fmt_percent(_first_value(row, ["涨跌幅", "涨幅"])), "data_prefilled"),
-                }
-            )
+            sector_name = _first_value(row, ["板块名称", "名称", "name"]) or ""
+            limit_up = _first_value(row, ["涨停家数", "涨停数"])
+            leader = _first_value(row, ["领涨股票", "龙头股"])
+            change = _first_value(row, ["涨跌幅", "涨幅"])
+            if sector_name:
+                main_sectors.append(
+                    {
+                        "sector": _field(sector_name),
+                        "limit_up_count": _field(limit_up or "", "data_prefilled" if limit_up is not None else "insufficient_evidence"),
+                        "leader": _field(leader or "", "data_prefilled" if leader else "insufficient_evidence"),
+                        "driver": _field("", "manual", "驱动逻辑需要结合公告、新闻或用户观察。"),
+                        "sustainability": _field("", "manual", "持续性判断需要用户确认。"),
+                        "change_pct": _field(_fmt_percent(change), "data_prefilled" if change is not None else "insufficient_evidence"),
+                    }
+                )
 
         if not zt_rows:
             missing.append("涨停家数")
@@ -179,30 +226,42 @@ class DailyMarketPrefillService:
         errors: list[dict[str, str]] = []
         rows = self._safe_records(
             ak,
-            "stock_sector_fund_flow_rank",
-            {"indicator": "今日", "sector_type": "概念资金流"},
-            "sector_fund_flow",
+            "stock_zh_a_spot",
+            {},
+            "a_spot",
             errors,
+            retries=3,
+            delay=5.0,
         )
         leaders: list[dict[str, object]] = []
-        for row in rows[:10]:
-            leaders.append(
-                {
-                    "target": _field(_first_value(row, ["名称", "板块名称", "name"]) or ""),
-                    "amount": _field(_fmt_amount(_first_value(row, ["今日主力净流入-净额", "主力净流入", "净额"]))),
-                    "sector": _field(_first_value(row, ["类型", "板块"]) or "概念资金流"),
-                    "intent": _field("", "manual", "主力意图猜测需要用户确认，系统不自动下结论。"),
-                }
-            )
+        if rows:
+            try:
+                sorted_rows = sorted(
+                    rows,
+                    key=lambda r: _to_float(_first_value(r, ["成交额", "amount", "turnover", "cje"])) or 0,
+                    reverse=True,
+                )
+            except Exception:
+                sorted_rows = rows
+            for row in sorted_rows[:10]:
+                raw_amount = _to_float(_first_value(row, ["成交额", "amount", "turnover", "cje"]))
+                leaders.append(
+                    {
+                        "target": _field(_first_value(row, ["名称", "name", "股票名称"]) or ""),
+                        "amount": _field(_fmt_amount(raw_amount)),
+                        "sector": _field(_first_value(row, ["所属行业", "行业", "sector"]) or ""),
+                        "intent": _field("", "manual", "主力意图猜测需要用户确认，系统不自动下结论。"),
+                    }
+                )
 
-        missing = [] if leaders else ["板块资金流"]
+        missing = [] if leaders else ["个股成交额排名"]
         return (
             {
                 "turnover_leaders": leaders,
                 "capital_direction": _field(
                     "；".join(str(_field_value(item["target"])) for item in leaders[:3]),
                     "data_prefilled" if leaders else "insufficient_evidence",
-                    "来自东方财富板块资金流排名，仅作为线索。",
+                    "来自新浪 A 股实时行情成交额排名，仅作为线索。",
                 ),
             },
             len(leaders),
@@ -264,15 +323,21 @@ class DailyMarketPrefillService:
         kwargs: dict[str, object],
         data_type: str,
         errors: list[dict[str, str]],
+        retries: int = 1,
+        delay: float = 2.0,
     ) -> list[dict[str, Any]]:
         if not hasattr(ak, func_name):
             errors.append({"provider": self.provider_name, "type": data_type, "message": f"{func_name} unavailable"})
             return []
-        try:
-            return _records(getattr(ak, func_name)(**kwargs))
-        except Exception as exc:
-            errors.append({"provider": self.provider_name, "type": data_type, "message": str(exc)})
-            return []
+        for attempt in range(retries + 1):
+            try:
+                return _records(getattr(ak, func_name)(**kwargs))
+            except Exception as exc:
+                if attempt < retries:
+                    time.sleep(delay * (attempt + 1))
+                else:
+                    errors.append({"provider": self.provider_name, "type": data_type, "message": str(exc)})
+        return []
 
 
 def build_daily_market_prefill_service() -> DailyMarketPrefillService:
@@ -297,12 +362,12 @@ def _field_source(field: object) -> str:
     return ""
 
 
-def _index_row(name: str, change_pct: str, turnover: str, note: str, source: str) -> dict[str, object]:
+def _index_row(name: str, direction: str, change_pct: str, style_meaning: str, source: str) -> dict[str, object]:
     return {
         "name": name,
+        "direction": _field(direction, source),
         "change_pct": _field(change_pct, source),
-        "turnover": _field(turnover, source),
-        "note": _field(note, source),
+        "style_meaning": _field(style_meaning, source, "风格含义由用户结合指数和市场观察确认。"),
     }
 
 
