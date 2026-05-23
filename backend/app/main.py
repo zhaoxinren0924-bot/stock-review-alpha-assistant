@@ -575,11 +575,11 @@ def build_daily_review_template(review_date: date) -> dict[str, object]:
             ],
         },
         "tomorrow_plan": {
-            "market_view": field_value(),
+            "market_expectation": field_value(),
             "position_plan": field_value(),
             "focus_sectors": [],
             "operation_plan": [],
-            "lessons": field_value(),
+            "lessons": [],
         },
         "weekly_review": {
             "enabled": is_weekend,

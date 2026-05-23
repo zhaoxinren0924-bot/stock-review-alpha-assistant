@@ -379,6 +379,64 @@ def test_collect_context_for_tomorrow_plan_condenses_other_sections() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_tomorrow_plan_persists_structured_fields() -> None:
+    """tomorrow_plan now holds structured arrays (operation_plan, lessons) plus
+    field-value enums (market_expectation, position_plan). Verify a PUT with a
+    content patch survives a round trip via the normal update endpoint."""
+    await create_tables()
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/api/v1/daily-reviews/2026-05-27/initialize")
+        review = (await client.get("/api/v1/daily-reviews/2026-05-27")).json()
+
+        patch_content = {
+            "tomorrow_plan": {
+                "market_expectation": {"value": "bullish", "source": "manual", "note": ""},
+                "position_plan": {"value": "add", "source": "manual", "note": ""},
+                "focus_sectors": ["AI 算力", "创新药"],
+                "operation_plan": [
+                    {
+                        "stock_code": "300308",
+                        "stock_name": "中际旭创",
+                        "direction": "buy",
+                        "trigger_condition": "突破 20 日线",
+                        "target_price": "180",
+                        "stop_loss": "150",
+                    },
+                ],
+                "lessons": [
+                    {"lesson_type": "追高", "description": "在涨停板上车,第二天回吐 7%"},
+                ],
+            }
+        }
+        updated = await client.put(
+            f"/api/v1/daily-reviews/{review['id']}",
+            json={"content": patch_content},
+        )
+        assert updated.status_code == 200
+        plan = updated.json()["content"]["tomorrow_plan"]
+        assert plan["market_expectation"]["value"] == "bullish"
+        assert plan["position_plan"]["value"] == "add"
+        assert plan["focus_sectors"] == ["AI 算力", "创新药"]
+        assert len(plan["operation_plan"]) == 1
+        assert plan["operation_plan"][0]["stock_name"] == "中际旭创"
+        assert plan["operation_plan"][0]["trigger_condition"] == "突破 20 日线"
+        assert len(plan["lessons"]) == 1
+        assert plan["lessons"][0]["lesson_type"] == "追高"
+
+        # Replacing operation_plan with empty array must drop the row entirely.
+        cleared = await client.put(
+            f"/api/v1/daily-reviews/{review['id']}",
+            json={"content": {"tomorrow_plan": {"operation_plan": []}}},
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["content"]["tomorrow_plan"]["operation_plan"] == []
+        # Other fields untouched.
+        assert cleared.json()["content"]["tomorrow_plan"]["market_expectation"]["value"] == "bullish"
+
+
+@pytest.mark.asyncio
 async def test_delete_daily_review_section_item_removes_only_target() -> None:
     """DELETE endpoint must pop only the indexed item from the requested field."""
     await create_tables()

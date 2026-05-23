@@ -1288,6 +1288,13 @@ function SectionMetaInput({
 }
 
 function DailyReviewSection({ review, sectionKey }: { review: DailyReview; sectionKey: string }) {
+  if (sectionKey === 'tomorrow_plan') {
+    return (
+      <div className="space-y-4">
+        <TomorrowPlanEditor review={review} />
+      </div>
+    )
+  }
   const section = review.content[sectionKey]
   const records = section && typeof section === 'object' ? (section as Record<string, unknown>) : {}
   return <div className="space-y-4">{renderDailySectionContent(sectionKey, records)}</div>
@@ -1583,22 +1590,348 @@ function renderDailySectionContent(sectionKey: string, records: Record<string, u
     )
   }
 
-  if (sectionKey === 'tomorrow_plan') {
-    return (
-      <div className="grid grid-cols-2 gap-3">
-        <TraceField label="明日市场判断" value={records.market_view} />
-        <TraceField label="仓位计划" value={records.position_plan} />
-        <TraceField label="重点关注板块" value={Array.isArray(records.focus_sectors) ? records.focus_sectors.join('、') : records.focus_sectors} />
-        <TraceField label="今日教训" value={records.lessons} />
-      </div>
-    )
-  }
-
   return (
     <div className="grid grid-cols-2 gap-3">
       {Object.entries(records).map(([key, value]) => (
         <TraceField key={key} label={key} value={value} />
       ))}
+    </div>
+  )
+}
+
+const MARKET_EXPECTATION_OPTIONS = [
+  { value: 'bullish', label: '看涨' },
+  { value: 'neutral', label: '震荡' },
+  { value: 'bearish', label: '看跌' },
+]
+
+const POSITION_PLAN_OPTIONS = [
+  { value: 'add', label: '加仓' },
+  { value: 'reduce', label: '减仓' },
+  { value: 'hold', label: '维持' },
+]
+
+const OPERATION_DIRECTION_OPTIONS = [
+  { value: 'buy', label: '买入' },
+  { value: 'sell', label: '卖出' },
+  { value: 'add', label: '加仓' },
+  { value: 'reduce', label: '减仓' },
+  { value: 'hold', label: '持有' },
+  { value: 'watch', label: '观望' },
+]
+
+const LESSON_TYPE_OPTIONS = [
+  '追高', '割肉', '没拿住', '错过', '误判风格', '误判主线', '仓位', '心态',
+]
+
+function TomorrowPlanEditor({ review }: { review: DailyReview }) {
+  const plan = (review.content.tomorrow_plan as Record<string, unknown>) || {}
+
+  const marketExpectation = readField(plan.market_expectation)
+  const positionPlan = readField(plan.position_plan)
+  const focusSectors = Array.isArray(plan.focus_sectors) ? (plan.focus_sectors as string[]) : []
+  const operationPlan = Array.isArray(plan.operation_plan) ? (plan.operation_plan as Record<string, unknown>[]) : []
+  const lessons = Array.isArray(plan.lessons) ? (plan.lessons as Record<string, unknown>[]) : []
+
+  // Candidates from today's hotspot review main sectors
+  const hotspot = (review.content.hotspot_review as Record<string, unknown>) || {}
+  const mainSectors = Array.isArray(hotspot.main_sectors) ? (hotspot.main_sectors as Record<string, unknown>[]) : []
+  const sectorCandidates = mainSectors.map((s) => String(s.sector || '')).filter(Boolean).slice(0, 3)
+
+  const [sectorInput, setSectorInput] = useState('')
+
+  const savePlan = async (patch: Record<string, unknown>) => {
+    const nextPlan = { ...plan, ...patch }
+    try {
+      await updateDailyReview(review.id, { content: { tomorrow_plan: nextPlan } })
+    } catch {
+      // Silently fail for MVP
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* 明日预期 */}
+      <div>
+        <div className="mb-2 text-xs font-medium text-slate-500">明日预期</div>
+        <div className="flex flex-wrap gap-2">
+          {MARKET_EXPECTATION_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() =>
+                savePlan({
+                  market_expectation: { value: opt.value, source: 'manual', note: '' },
+                })
+              }
+              className={`rounded-lg border px-3 py-1.5 text-sm ${
+                marketExpectation === opt.value
+                  ? 'border-blue-500 bg-blue-50 text-blue-700'
+                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 仓位计划 */}
+      <div>
+        <div className="mb-2 text-xs font-medium text-slate-500">仓位计划</div>
+        <div className="flex flex-wrap gap-2">
+          {POSITION_PLAN_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() =>
+                savePlan({
+                  position_plan: { value: opt.value, source: 'manual', note: '' },
+                })
+              }
+              className={`rounded-lg border px-3 py-1.5 text-sm ${
+                positionPlan === opt.value
+                  ? 'border-blue-500 bg-blue-50 text-blue-700'
+                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 重点关注板块 */}
+      <div>
+        <div className="mb-2 text-xs font-medium text-slate-500">重点关注板块</div>
+        {sectorCandidates.length > 0 && (
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-slate-400">今日主线候选:</span>
+            {sectorCandidates.map((s) => (
+              <button
+                key={s}
+                onClick={() => {
+                  if (!focusSectors.includes(s)) {
+                    savePlan({ focus_sectors: [...focusSectors, s] })
+                  }
+                }}
+                className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-600 hover:bg-blue-50 hover:text-blue-600"
+              >
+                + {s}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="flex flex-wrap gap-2">
+          {focusSectors.map((s, idx) => (
+            <span
+              key={`${s}-${idx}`}
+              className="flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs text-blue-700"
+            >
+              {s}
+              <button
+                onClick={() => savePlan({ focus_sectors: focusSectors.filter((_, i) => i !== idx) })}
+                className="text-blue-400 hover:text-blue-700"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+          <div className="flex items-center gap-1">
+            <input
+              value={sectorInput}
+              onChange={(e) => setSectorInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && sectorInput.trim()) {
+                  e.preventDefault()
+                  savePlan({ focus_sectors: [...focusSectors, sectorInput.trim()] })
+                  setSectorInput('')
+                }
+              }}
+              placeholder="输入板块按回车"
+              className="h-8 w-40 rounded-lg border border-slate-200 bg-white px-2 text-sm focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* 操作计划表 */}
+      <div>
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-xs font-medium text-slate-500">操作计划表</span>
+          <button
+            onClick={() =>
+              savePlan({
+                operation_plan: [
+                  ...operationPlan,
+                  {
+                    stock_code: '',
+                    stock_name: '',
+                    direction: 'buy',
+                    trigger_condition: '',
+                    target_price: '',
+                    stop_loss: '',
+                  },
+                ],
+              })
+            }
+            className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+          >
+            <Plus className="h-3 w-3" /> 添加
+          </button>
+        </div>
+        {operationPlan.length > 0 ? (
+          <table className="w-full text-sm">
+            <thead className="border-b border-slate-200">
+              <tr className="text-xs text-slate-500">
+                <th className="px-2 py-1.5 text-left font-medium">标的</th>
+                <th className="px-2 py-1.5 text-left font-medium">方向</th>
+                <th className="px-2 py-1.5 text-left font-medium">触发条件</th>
+                <th className="px-2 py-1.5 text-left font-medium">目标价</th>
+                <th className="px-2 py-1.5 text-left font-medium">止损价</th>
+                <th className="px-2 py-1.5 text-left font-medium"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {operationPlan.map((row, idx) => (
+                <tr key={idx}>
+                  <td className="px-2 py-1">
+                    <input
+                      value={String(row.stock_name || '')}
+                      onChange={(e) => {
+                        const next = [...operationPlan]
+                        next[idx] = { ...next[idx], stock_name: e.target.value }
+                        savePlan({ operation_plan: next })
+                      }}
+                      placeholder="名称/代码"
+                      className="h-7 w-24 rounded border border-slate-200 px-1.5 text-sm focus:border-blue-500 focus:outline-none"
+                    />
+                  </td>
+                  <td className="px-2 py-1">
+                    <select
+                      value={String(row.direction || 'buy')}
+                      onChange={(e) => {
+                        const next = [...operationPlan]
+                        next[idx] = { ...next[idx], direction: e.target.value }
+                        savePlan({ operation_plan: next })
+                      }}
+                      className="h-7 rounded border border-slate-200 bg-white px-1 text-sm"
+                    >
+                      {OPERATION_DIRECTION_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-2 py-1">
+                    <input
+                      value={String(row.trigger_condition || '')}
+                      onChange={(e) => {
+                        const next = [...operationPlan]
+                        next[idx] = { ...next[idx], trigger_condition: e.target.value }
+                        savePlan({ operation_plan: next })
+                      }}
+                      placeholder="如 突破20日线"
+                      className="h-7 w-32 rounded border border-slate-200 px-1.5 text-sm focus:border-blue-500 focus:outline-none"
+                    />
+                  </td>
+                  <td className="px-2 py-1">
+                    <input
+                      value={String(row.target_price || '')}
+                      onChange={(e) => {
+                        const next = [...operationPlan]
+                        next[idx] = { ...next[idx], target_price: e.target.value }
+                        savePlan({ operation_plan: next })
+                      }}
+                      placeholder="目标价"
+                      className="h-7 w-20 rounded border border-slate-200 px-1.5 text-sm focus:border-blue-500 focus:outline-none"
+                    />
+                  </td>
+                  <td className="px-2 py-1">
+                    <input
+                      value={String(row.stop_loss || '')}
+                      onChange={(e) => {
+                        const next = [...operationPlan]
+                        next[idx] = { ...next[idx], stop_loss: e.target.value }
+                        savePlan({ operation_plan: next })
+                      }}
+                      placeholder="止损价"
+                      className="h-7 w-20 rounded border border-slate-200 px-1.5 text-sm focus:border-blue-500 focus:outline-none"
+                    />
+                  </td>
+                  <td className="px-2 py-1">
+                    <button
+                      onClick={() => savePlan({ operation_plan: operationPlan.filter((_, i) => i !== idx) })}
+                      className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <EmptyText text="点击右上角添加按钮录入操作计划" />
+        )}
+      </div>
+
+      {/* 今日教训 */}
+      <div>
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-xs font-medium text-slate-500">今日教训</span>
+          <button
+            onClick={() => savePlan({ lessons: [...lessons, { lesson_type: '', description: '' }] })}
+            className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+          >
+            <Plus className="h-3 w-3" /> 添加
+          </button>
+        </div>
+        {lessons.length > 0 ? (
+          <div className="space-y-2">
+            {lessons.map((lesson, idx) => (
+              <div
+                key={idx}
+                className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white p-2"
+              >
+                <select
+                  value={String(lesson.lesson_type || '')}
+                  onChange={(e) => {
+                    const next = [...lessons]
+                    next[idx] = { ...next[idx], lesson_type: e.target.value }
+                    savePlan({ lessons: next })
+                  }}
+                  className="h-8 shrink-0 rounded border border-slate-200 bg-white px-2 text-sm"
+                >
+                  <option value="">选择类型</option>
+                  {LESSON_TYPE_OPTIONS.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={String(lesson.description || '')}
+                  onChange={(e) => {
+                    const next = [...lessons]
+                    next[idx] = { ...next[idx], description: e.target.value }
+                    savePlan({ lessons: next })
+                  }}
+                  placeholder="描述具体发生了什么..."
+                  className="h-8 flex-1 rounded border border-slate-200 px-2 text-sm focus:border-blue-500 focus:outline-none"
+                />
+                <button
+                  onClick={() => savePlan({ lessons: lessons.filter((_, i) => i !== idx) })}
+                  className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyText text="点击右上角添加按钮录入今日教训（建议至少1条）" />
+        )}
+      </div>
     </div>
   )
 }
