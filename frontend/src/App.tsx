@@ -1,5 +1,5 @@
 ﻿import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react'
-import { BookOpen, Building2, CalendarDays, CheckCircle2, Database, Plus, RefreshCw, RotateCcw, Save, Trash2, X } from 'lucide-react'
+import { BookOpen, Building2, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, Database, MessageSquare, Plus, RefreshCw, RotateCcw, Save, Sparkles, Trash2, X } from 'lucide-react'
 import { applyAiAction, chatWithAi, type AiAction } from './services/aiService'
 import {
   listEvents,
@@ -186,6 +186,7 @@ function App() {
   const [dailyError, setDailyError] = useState('')
   const [dailyAiLoading, setDailyAiLoading] = useState(false)
   const [prefillSummary, setPrefillSummary] = useState('')
+  const [aiOpen, setAiOpen] = useState(false)
 
   const selectedStock = useMemo(
     () => stocks.find((stock) => stock.code === selectedCode) ?? null,
@@ -336,12 +337,14 @@ function App() {
 
   const handleAiSubmit = async (event: FormEvent) => {
     event.preventDefault()
+    console.log('[AI Chat] submit clicked', { stock: selectedStock?.code, message: aiInput.trim() })
     if (!selectedStock || !aiInput.trim()) return
 
     setAiLoading(true)
     setAiError('')
     try {
       const response = await chatWithAi(selectedStock.code, aiInput.trim())
+      console.log('[AI Chat] response ok', { replyLen: response.reply.length, actions: response.actions.length })
       setAiReply(response.reply)
       setEvidenceCards(response.evidenceCards)
       setAiActions(response.actions.map((action) => ({
@@ -350,6 +353,7 @@ function App() {
       })))
       setAiInput('')
     } catch (err) {
+      console.error('[AI Chat] error', err)
       setAiError(err instanceof Error ? err.message : 'AI 生成失败，请稍后重试')
     } finally {
       setAiLoading(false)
@@ -440,16 +444,19 @@ function App() {
 
   const handleDailyAiSubmit = async (event: FormEvent) => {
     event.preventDefault()
+    console.log('[AI Coach] submit clicked', { reviewId: dailyReview?.id, section: dailySectionKey, message: dailyMessage.trim() })
     if (!dailyReview || !dailyMessage.trim()) return
     setDailyAiLoading(true)
     setDailyError('')
     try {
       const response = await coachDailyReview(dailyReview.id, dailySectionKey, dailyMessage.trim())
+      console.log('[AI Coach] response ok', { replyLen: response.reply.length, actions: response.actions.length })
       setDailyReply(response.reply)
       setDailyActions(response.actions)
       setDailyEvidenceCards(response.evidenceCards)
       setDailyMessage('')
     } catch (err) {
+      console.error('[AI Coach] error', err)
       setDailyError(err instanceof Error ? err.message : 'AI 复盘教练生成失败')
     } finally {
       setDailyAiLoading(false)
@@ -806,7 +813,34 @@ function App() {
         )}
       </main>
 
-      <aside className="flex h-screen w-[400px] shrink-0 flex-col border-l border-slate-200 bg-white">
+      {!aiOpen && (
+        <button
+          onClick={() => setAiOpen(true)}
+          className="fixed right-5 bottom-5 z-30 flex h-12 items-center gap-2 rounded-full bg-blue-600 px-5 text-sm font-medium text-white shadow-lg shadow-blue-600/30 hover:bg-blue-700"
+        >
+          <Sparkles className="h-4 w-4" />
+          AI 教练
+        </button>
+      )}
+
+      <aside
+        className={`flex h-screen shrink-0 flex-col border-l border-slate-200 bg-white transition-[width] duration-200 ${
+          aiOpen ? 'w-[400px]' : 'w-0 overflow-hidden border-l-0'
+        }`}
+      >
+        <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
+          <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
+            <MessageSquare className="h-4 w-4 text-blue-600" />
+            AI 复盘教练
+          </div>
+          <button
+            onClick={() => setAiOpen(false)}
+            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+            aria-label="收起 AI 面板"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
         {viewMode === 'daily' ? (
           <DailyReviewAiPanel
             review={dailyReview}
@@ -824,10 +858,9 @@ function App() {
           />
         ) : (
           <>
-        <header className="shrink-0 border-b border-slate-200 px-4 py-4">
-          <h2 className="text-base font-semibold text-slate-900">AI 复盘引导器</h2>
-          <p className="mt-1 text-xs text-slate-500">先看证据边界，再把想法变成可保存成果</p>
-        </header>
+        <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">
+          先看证据边界，再把想法变成可保存成果
+        </div>
         <div className="flex-1 overflow-y-auto p-4">
           {!selectedStock ? (
             <EmptyText text="选择股票后开始整理投资判断" />
@@ -868,7 +901,7 @@ function App() {
               )}
 
               <div className="space-y-3">
-                {aiActions.map((action, index) => (
+                {Array.isArray(aiActions) && aiActions.map((action, index) => (
                   <AiActionCard
                     key={`${action.type}-${index}`}
                     action={action}
@@ -983,134 +1016,251 @@ function DailyReviewWorkspace({
   onPrefill: () => void
   onMetaChange: (patch: { status?: string; market_style?: string | null; main_sector?: string | null; sentiment?: string | null }) => void
 }) {
-  return (
-    <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-bold text-slate-900">每日复盘工作台</h2>
-          <p className="mt-1 text-sm text-slate-500">按固定框架复盘市场、主线、自选股和基本面证据</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            type="date"
-            value={reviewDate}
-            onChange={(event) => onDateChange(event.target.value)}
-            className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
-          />
-          <button
-            onClick={onInitialize}
-            disabled={loading}
-            className="flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-          >
-            <CalendarDays className="h-4 w-4" />
-            {loading ? '创建中' : '打开复盘'}
-          </button>
-        </div>
-      </div>
+  const [errorDismissed, setErrorDismissed] = useState(false)
+  useEffect(() => {
+    setErrorDismissed(false)
+  }, [error])
 
-      {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+  const shiftDate = (days: number) => {
+    if (!reviewDate) return
+    const d = new Date(reviewDate)
+    d.setDate(d.getDate() + days)
+    onDateChange(d.toISOString().slice(0, 10))
+  }
+
+  const handleSectionJump = (key: string) => {
+    onSectionChange(key)
+    const el = document.getElementById(`section-${key}`)
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  // Track scroll position to highlight current section in the ToC.
+  useEffect(() => {
+    if (!review) return
+    const handler = () => {
+      for (const section of DAILY_SECTIONS) {
+        const el = document.getElementById(`section-${section.key}`)
+        if (!el) continue
+        const rect = el.getBoundingClientRect()
+        if (rect.top >= 64 && rect.top < 240) {
+          if (section.key !== sectionKey) onSectionChange(section.key)
+          break
+        }
+      }
+    }
+    const container = document.getElementById('daily-scroll')
+    container?.addEventListener('scroll', handler, { passive: true })
+    return () => container?.removeEventListener('scroll', handler)
+  }, [review, sectionKey, onSectionChange])
+
+  return (
+    <div id="daily-scroll" className="relative h-full overflow-y-auto">
+      {/* Sticky compact top bar */}
+      <div className="sticky top-0 z-20 -mx-6 -mt-6 mb-4 border-b border-slate-200 bg-slate-50/95 px-6 py-2.5 backdrop-blur">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <h2 className="text-base font-semibold text-slate-900">每日复盘</h2>
+            <div className="flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white">
+              <button
+                onClick={() => shiftDate(-1)}
+                className="flex h-8 w-8 items-center justify-center text-slate-500 hover:text-slate-900"
+                aria-label="前一天"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <input
+                type="date"
+                value={reviewDate}
+                onChange={(event) => onDateChange(event.target.value)}
+                className="h-8 border-x border-slate-200 bg-white px-2 text-sm focus:outline-none"
+              />
+              <button
+                onClick={() => shiftDate(1)}
+                className="flex h-8 w-8 items-center justify-center text-slate-500 hover:text-slate-900"
+                aria-label="后一天"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+            {review && (
+              <select
+                value={review.status}
+                onChange={(event) => onMetaChange({ status: event.target.value })}
+                className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-sm"
+              >
+                <option value="draft">草稿</option>
+                <option value="completed">已完成</option>
+              </select>
+            )}
+            {prefillSummary && (
+              <span className="hidden text-xs text-slate-500 lg:inline">{prefillSummary}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {review ? (
+              <button
+                onClick={onPrefill}
+                disabled={prefillLoading}
+                className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${prefillLoading ? 'animate-spin' : ''}`} />
+                数据预填
+              </button>
+            ) : (
+              <button
+                onClick={onInitialize}
+                disabled={loading}
+                className="flex h-8 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                <CalendarDays className="h-3.5 w-3.5" />
+                {loading ? '创建中' : '初始化当日'}
+              </button>
+            )}
+          </div>
+        </div>
+        {error && !errorDismissed && (
+          <div className="mt-2 flex items-start justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800">
+            <span>{error}</span>
+            <button
+              onClick={() => setErrorDismissed(true)}
+              className="shrink-0 text-amber-600 hover:text-amber-900"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
 
       {!review ? (
         <div className="flex min-h-[520px] items-center justify-center rounded-lg border border-slate-200 bg-white text-center">
           <div>
             <CalendarDays className="mx-auto mb-4 h-12 w-12 text-slate-300" />
-            <p className="text-sm text-slate-500">选择日期后打开每日复盘模板</p>
+            <p className="text-sm text-slate-500">选择日期后初始化当日复盘模板</p>
           </div>
         </div>
       ) : (
-        <>
-          <section className="rounded-lg border border-slate-200 bg-white p-5">
-            <div className="grid grid-cols-[120px_1fr_1fr_1fr_140px] gap-3">
-              <select
-                value={review.status}
-                onChange={(event) => onMetaChange({ status: event.target.value })}
-                className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
+        <div className="flex gap-6">
+          {/* Main: 8 sections stacked vertically */}
+          <div className="flex-1 space-y-4 pb-24">
+            {DAILY_SECTIONS.map((section, index) => (
+              <SectionCard
+                key={section.key}
+                id={`section-${section.key}`}
+                index={index + 1}
+                title={section.label}
+                hint={section.hint}
               >
-                <option value="draft">草稿</option>
-                <option value="completed">已完成</option>
-              </select>
-              <input
-                value={review.marketStyle ?? ''}
-                onChange={(event) => onMetaChange({ market_style: event.target.value || null })}
-                placeholder="市场风格，如 小盘/科技/均衡"
-                className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
-              />
-              <input
-                value={review.mainSector ?? ''}
-                onChange={(event) => onMetaChange({ main_sector: event.target.value || null })}
-                placeholder="主线板块，如 AI 算力"
-                className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
-              />
-              <input
-                value={review.sentiment ?? ''}
-                onChange={(event) => onMetaChange({ sentiment: event.target.value || null })}
-                placeholder="情绪，如 强/弱/分歧"
-                className="h-9 rounded-lg border border-slate-200 px-3 text-sm"
-              />
-              <button
-                onClick={onPrefill}
-                disabled={prefillLoading}
-                className="flex h-9 items-center justify-center gap-1.5 rounded-lg border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-              >
-                <RefreshCw className={`h-4 w-4 ${prefillLoading ? 'animate-spin' : ''}`} />
-                数据预填
-              </button>
-            </div>
-            {prefillSummary && (
-              <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm leading-relaxed text-blue-800">
-                {prefillSummary}
-              </div>
-            )}
-          </section>
-
-          <div className="grid grid-cols-[220px_1fr] gap-4">
-            <section className="rounded-lg border border-slate-200 bg-white p-3">
-              <div className="mb-2 px-2 text-xs font-medium text-slate-500">复盘框架</div>
-              <div className="space-y-1">
-                {DAILY_SECTIONS.map((section) => (
-                  <button
-                    key={section.key}
-                    onClick={() => onSectionChange(section.key)}
-                    className={`w-full rounded-lg px-3 py-2 text-left ${
-                      sectionKey === section.key ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="text-sm font-medium">{section.label}</div>
-                    <div className="mt-0.5 text-xs opacity-75">{section.hint}</div>
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            <DailyReviewSection review={review} sectionKey={sectionKey} />
+                <DailyReviewSection review={review} sectionKey={section.key} />
+                {section.key === 'index_review' && (
+                  <SectionMetaInput
+                    label="市场风格(你的判断)"
+                    value={review.marketStyle ?? ''}
+                    placeholder="如 小盘 / 科技 / 均衡"
+                    onChange={(v) => onMetaChange({ market_style: v || null })}
+                  />
+                )}
+                {section.key === 'hotspot_review' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <SectionMetaInput
+                      label="主线板块(你的结论)"
+                      value={review.mainSector ?? ''}
+                      placeholder="如 AI 算力"
+                      onChange={(v) => onMetaChange({ main_sector: v || null })}
+                    />
+                    <SectionMetaInput
+                      label="情绪(强 / 弱 / 分歧)"
+                      value={review.sentiment ?? ''}
+                      placeholder="如 强"
+                      onChange={(v) => onMetaChange({ sentiment: v || null })}
+                    />
+                  </div>
+                )}
+              </SectionCard>
+            ))}
           </div>
-        </>
+
+          {/* Right-side floating ToC */}
+          <nav className="sticky top-20 hidden h-fit w-44 shrink-0 self-start space-y-0.5 xl:block">
+            <div className="mb-2 px-2 text-xs font-medium uppercase tracking-wider text-slate-400">导航</div>
+            {DAILY_SECTIONS.map((section, index) => (
+              <button
+                key={section.key}
+                onClick={() => handleSectionJump(section.key)}
+                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                  sectionKey === section.key
+                    ? 'bg-blue-50 font-medium text-blue-700'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <span className="text-xs text-slate-400">{index + 1}</span>
+                <span className="truncate">{section.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
       )}
     </div>
   )
 }
 
-function DailyReviewSection({ review, sectionKey }: { review: DailyReview; sectionKey: string }) {
-  const section = review.content[sectionKey]
-  const sectionInfo = DAILY_SECTIONS.find((item) => item.key === sectionKey)
-  const records = section && typeof section === 'object' ? (section as Record<string, unknown>) : {}
-
+function SectionCard({
+  id,
+  index,
+  title,
+  hint,
+  children,
+}: {
+  id: string
+  index: number
+  title: string
+  hint: string
+  children: ReactNode
+}) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5">
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-lg font-semibold text-slate-900">{sectionInfo?.label ?? sectionKey}</h3>
-          <p className="mt-1 text-sm text-slate-500">{sectionInfo?.hint}</p>
-        </div>
-        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-500">
-          {review.reviewDate}
+    <section
+      id={id}
+      className="scroll-mt-20 rounded-xl border border-slate-200 bg-white shadow-sm"
+    >
+      <div className="flex items-baseline gap-3 border-b border-slate-100 px-5 py-3">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-50 text-xs font-semibold text-blue-700">
+          {index}
         </span>
+        <h3 className="text-base font-semibold text-slate-900">{title}</h3>
+        <span className="text-xs text-slate-400">{hint}</span>
       </div>
-      <div className="space-y-4">
-        {renderDailySectionContent(sectionKey, records)}
-      </div>
+      <div className="space-y-3 p-5">{children}</div>
     </section>
   )
+}
+
+function SectionMetaInput({
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string
+  value: string
+  placeholder?: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-medium text-slate-500">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="h-9 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+      />
+    </label>
+  )
+}
+
+function DailyReviewSection({ review, sectionKey }: { review: DailyReview; sectionKey: string }) {
+  const section = review.content[sectionKey]
+  const records = section && typeof section === 'object' ? (section as Record<string, unknown>) : {}
+  return <div className="space-y-4">{renderDailySectionContent(sectionKey, records)}</div>
 }
 
 function renderDailySectionContent(sectionKey: string, records: Record<string, unknown>) {
@@ -1166,24 +1316,77 @@ function renderDailySectionContent(sectionKey: string, records: Record<string, u
 
   if (sectionKey === 'index_review') {
     const indices = Array.isArray(records.indices) ? records.indices as Record<string, unknown>[] : []
+
+    const aShareNames = new Set(['上证指数', '深证成指', '创业板指', '科创50', '中证2000'])
+    const overseasNames = new Set(['纳斯达克', '标普500', '恒生指数', '道琼斯'])
+
+    const aShares = indices.filter((i) => aShareNames.has(String(i.name ?? '')))
+    const overseas = indices.filter((i) => overseasNames.has(String(i.name ?? '')))
+
+    function fmtChange(val: unknown): { text: string; cls: string } {
+      const t = readField(val)
+      if (!t || t === '接口失败') return { text: '—', cls: 'text-slate-300' }
+      if (t.startsWith('+')) return { text: t, cls: 'text-red-600' }
+      if (t.startsWith('-')) return { text: t, cls: 'text-emerald-600' }
+      return { text: t, cls: 'text-slate-700' }
+    }
+
+    function fmtVol(turnover: unknown, note: unknown): string {
+      const n = readField(note)
+      if (n === '接口失败') return '数据暂缺'
+      const t = readField(turnover)
+      return t || '—'
+    }
+
+    function IndexCards({ items }: { items: Record<string, unknown>[] }) {
+      return (
+        <div className="grid grid-cols-5 gap-2">
+          {items.map((item) => {
+            const change = fmtChange(item.change_pct)
+            const missing = readField(item.note) === '接口失败'
+            return (
+              <div
+                key={String(item.name)}
+                className={`rounded-lg border p-3 ${missing ? 'border-dashed border-slate-200 bg-slate-50' : 'border-slate-200 bg-white'}`}
+              >
+                <div className="text-xs text-slate-500">{String(item.name ?? '')}</div>
+                <div className={`mt-1 text-xl font-bold ${change.cls}`}>{change.text}</div>
+                <div className="mt-0.5 text-[11px] text-slate-400">{fmtVol(item.turnover, item.note)}</div>
+              </div>
+            )
+          })}
+        </div>
+      )
+    }
+
     return (
-      <>
-        <DailyTable
-          empty="暂无指数数据，第一版需要手动填写。"
-          headers={['指数', '涨跌幅', '成交额', '备注']}
-          rows={indices.map((item) => [
-            String(item.name ?? ''),
-            readField(item.change_pct),
-            readField(item.turnover),
-            readField(item.note),
-          ])}
-        />
-        <div className="grid grid-cols-3 gap-3">
-          <TraceField label="领涨指数" value={records.leading_index} />
+      <div className="space-y-4">
+        {aShares.length > 0 && (
+          <div>
+            <div className="mb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">A股指数</div>
+            <IndexCards items={aShares} />
+          </div>
+        )}
+
+        {overseas.length > 0 && (
+          <div>
+            <div className="mb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">海外市场</div>
+            <IndexCards items={overseas} />
+          </div>
+        )}
+
+        {indices.length === 0 && <EmptyText text="暂无指数数据，点击数据预填后从 AKShare 生成。" />}
+
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+          <div className="text-xs font-medium text-amber-700">领涨指数</div>
+          <div className="mt-1 text-sm font-semibold text-amber-900">{readField(records.leading_index) || '待补充'}</div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
           <TraceField label="市场风格" value={records.market_style} />
           <TraceField label="外部影响" value={records.external_impact} />
         </div>
-      </>
+      </div>
     )
   }
 
@@ -1354,10 +1557,9 @@ function DailyReviewAiPanel({
   const section = DAILY_SECTIONS.find((item) => item.key === sectionKey)
   return (
     <>
-      <header className="shrink-0 border-b border-slate-200 px-4 py-4">
-        <h2 className="text-base font-semibold text-slate-900">AI 每日复盘教练</h2>
-        <p className="mt-1 text-xs text-slate-500">围绕当前 section 追问，并生成待保存成果</p>
-      </header>
+      <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">
+        围绕当前 section 追问，并生成待保存成果
+      </div>
       <div className="flex-1 overflow-y-auto p-4">
         {!review ? (
           <EmptyText text="先打开当天复盘模板" />
@@ -1382,7 +1584,7 @@ function DailyReviewAiPanel({
               </div>
             )}
             <div className="space-y-3">
-              {actions.map((action, index) => (
+              {Array.isArray(actions) && actions.map((action, index) => (
                 <AiActionCard
                   key={`${action.type}-${index}`}
                   action={action}

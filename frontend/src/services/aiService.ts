@@ -67,7 +67,7 @@ export async function chatWithAi(stockCode: string, message: string): Promise<Ai
       message,
       history: [],
     }),
-  })
+  }, 90000)
   return {
     reply: data.reply,
     actions: data.actions,

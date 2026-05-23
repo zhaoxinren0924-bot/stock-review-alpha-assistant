@@ -160,7 +160,7 @@ export async function coachDailyReview(
       message,
       history: [],
     }),
-  })
+  }, 90000)
   return {
     reply: data.reply,
     actions: data.actions,
